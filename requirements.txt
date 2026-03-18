@@ -1,4 +1,4 @@
 discord.py
 yt-dlp
 static-ffmpeg
-asyncio
+PyNaCl
