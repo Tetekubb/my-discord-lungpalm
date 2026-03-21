@@ -78,7 +78,7 @@ class MusicBot(commands.Bot):
         try:
             self.tree.copy_global_to(guild=MY_GUILD_ID)
             await self.tree.sync(guild=MY_GUILD_ID)
-            print(f"✅ Tete Music Online!")
+            print(f"✅ Tete Music Online! พร้อมใช้งานคำสั่ง /setup และ /play")
         except Exception as e:
             print(f"⚠️ Sync Error: {e}")
 
@@ -116,9 +116,28 @@ async def next_song(guild, channel, user):
         await play_engine(guild, channel, user, song)
 
 # --- [Commands] ---
+
+@bot.tree.command(name="setup", description="สร้างห้องควบคุมเพลงพิเศษ")
+async def setup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # สร้างห้อง text channel ใหม่
+    channel = await interaction.guild.create_text_channel('🎵-tete-music')
+    
+    embed = discord.Embed(title="🎵 Tete Music System", color=0x2f3136)
+    embed.set_image(url="https://media.discordapp.net/attachments/1118943144889618534/1213054545622319134/standard_1.gif")
+    embed.description = "```\nพิมพ์ชื่อเพลงที่อยากฟังลงในแชทนี้ได้เลย!\n```"
+    
+    # ส่งข้อความตั้งค่าเริ่มต้นพร้อมปุ่มควบคุม
+    await channel.send(embed=embed, view=TeteControlView(bot, interaction.guild.id))
+    await interaction.followup.send(f"✅ สร้างห้อง <#{channel.id}> เรียบร้อยแล้วพี่!", ephemeral=True)
+
 @bot.tree.command(name="play", description="เล่นเพลงจาก YouTube")
 async def play(interaction: discord.Interaction, search: str):
-    await interaction.response.defer()
+    # ตรวจสอบสถานะ Interaction ก่อน
+    if not interaction.response.is_done():
+        await interaction.response.defer()
+        
     if not interaction.user.voice:
         return await interaction.followup.send("❌ พี่เข้าห้องเสียงก่อนนะ!")
 
@@ -148,8 +167,11 @@ async def play(interaction: discord.Interaction, search: str):
 async def on_message(message):
     if message.author == bot.user: return
     if message.channel.name == '🎵-tete-music':
-        # ดึงคำสั่งมาใช้งานโดยตรงเมื่อพิมพ์ในช่องแชท
-        await bot.tree.get_command('play').callback(message.guild.get_member(message.author.id), message.content)
-        await message.delete()
+        # ดึงสมาชิกเพื่อส่งเข้า Command
+        member = message.guild.get_member(message.author.id)
+        if member:
+            # เรียกใช้คำสั่ง play โดยตรงเมื่อพิมพ์ชื่อเพลง
+            await bot.tree.get_command('play').callback(member, message.content)
+            await message.delete()
 
 bot.run(TOKEN)
