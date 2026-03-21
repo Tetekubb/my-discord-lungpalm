@@ -11,13 +11,11 @@ static_ffmpeg.add_paths()
 TOKEN = os.getenv('TOKEN')
 MY_GUILD_ID = discord.Object(id=1467879682019033088) 
 
-# ปรับ Options ให้ดึงข้อมูลได้แม่นยำขึ้น (ไม่ย่อโค้ด)
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
-    'quiet': False, # เปิดให้โชว์ Log การหาเพลงในเครื่อง
+    'quiet': False,
     'no_warnings': False,
-    'default_search': 'ytsearch',
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'extract_flat': False,
@@ -135,14 +133,21 @@ async def play(interaction: discord.Interaction, search: str):
 
     vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
 
+    # แก้ไขตรรกะการค้นหา: ถ้าเป็นลิ้งก์ให้ใช้ลิ้งก์ตรง ถ้าไม่ใช่ค่อยค้นหา
+    query = search if search.startswith(('http://', 'https://')) else f"ytsearch1:{search}"
+
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
         try:
-            # ค้นหาเพลง (เพิ่มความละเอียดในการหา)
-            info = ydl.extract_info(f"ytsearch1:{search}", download=False)
-            if not info or 'entries' not in info or not info['entries']:
-                return await interaction.followup.send(f"❌ หาเพลง **'{search}'** ไม่เจอครับพี่ ลองเปลี่ยนชื่อดู")
+            info = ydl.extract_info(query, download=False)
+            
+            # ตรวจสอบผลลัพธ์จากการค้นหาหรือลิ้งก์ตรง
+            if 'entries' in info:
+                if not info['entries']:
+                    return await interaction.followup.send(f"❌ หาเพลง **'{search}'** ไม่เจอครับ")
+                data = info['entries'][0]
+            else:
+                data = info
 
-            data = info['entries'][0]
             song = {
                 'url': data['url'], 
                 'title': data['title'], 
