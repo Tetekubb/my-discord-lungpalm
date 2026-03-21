@@ -5,8 +5,6 @@ import yt_dlp
 import asyncio
 import static_ffmpeg
 import os
-import static_ffmpeg
-static_ffmpeg.add_paths()
 from datetime import datetime
 
 # --- [Settings] ---
@@ -21,7 +19,8 @@ YDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'extract_flat': 'in_playlist', # ดึงข้อมูลไวขึ้น
+    'extract_flat': True,  # ดึงข้อมูลไวขึ้นมาก
+    'skip_download': True,
 }
 
 FFMPEG_OPTIONS = {
@@ -30,7 +29,6 @@ FFMPEG_OPTIONS = {
 }
 
 class MusicView(discord.ui.View):
-    """คลาสสำหรับปุ่มควบคุมใต้ Embed เพลง"""
     def __init__(self, bot, guild_id):
         super().__init__(timeout=None)
         self.bot = bot
@@ -70,7 +68,8 @@ class MusicBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.queue = {}
-        self.autoplay = {} # เก็บสถานะ AutoPlay แยกเซิร์ฟเวอร์
+        self.autoplay = {}
+        self.last_song_url = {} # เก็บไว้ใช้สำหรับ AutoPlay
 
     async def setup_hook(self):
         static_ffmpeg.add_paths()
@@ -80,47 +79,68 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
-def get_embed(info, interaction, status="กำลังเล่น"):
+def get_embed(info, user, status="กำลังเล่น"):
     embed = discord.Embed(title="Kanopi Music System", color=0xff2d55)
     embed.add_field(name="Now playing:", value=f"```\n{info['title']}\n```", inline=False)
     embed.add_field(name="Author:", value=f"└ {info.get('uploader', 'Unknown')}", inline=True)
     embed.add_field(name="Duration:", value=f"└ {info.get('duration_string', '00:00')}", inline=True)
-    embed.add_field(name="Requester:", value=f"└ {interaction.user.mention}", inline=True)
-    if 'thumbnail' in info:
+    embed.add_field(name="Requester:", value=f"└ {user.mention}", inline=True)
+    if info.get('thumbnail'):
         embed.set_image(url=info['thumbnail'])
     return embed
 
-async def play_music(interaction, song):
-    vc = interaction.guild.voice_client
+async def play_music(guild, channel, user, song):
+    vc = guild.voice_client
     if not vc: return
 
-    # ปรับปรุงระบบ Volume เพื่อแก้บัคเสียงเบา/แตก
-    source = discord.PCMVolumeTransformer(await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS))
-    source.volume = 0.8 # ตั้งค่าเริ่มต้น 80%
+    bot.last_song_url[guild.id] = song['original_url']
 
-    def after_playing(error):
-        asyncio.run_coroutine_threadsafe(next_song(interaction), bot.loop)
+    try:
+        source = discord.PCMVolumeTransformer(await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS))
+        source.volume = 0.8
 
-    vc.play(source, after=after_playing)
-    view = MusicView(bot, interaction.guild_id)
-    await interaction.channel.send(embed=get_embed(song, interaction), view=view)
+        def after_playing(error):
+            coro = next_song(guild, channel, user)
+            fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+            try: fut.result()
+            except: pass
 
-async def next_song(interaction):
-    guild_id = interaction.guild_id
-    vc = interaction.guild.voice_client
+        vc.play(source, after=after_playing)
+        view = MusicView(bot, guild.id)
+        await channel.send(embed=get_embed(song, user), view=view)
+    except Exception as e:
+        await channel.send(f"❌ เกิดข้อผิดพลาดในการเล่น: {e}")
+        await next_song(guild, channel, user)
+
+async def next_song(guild, channel, user):
+    guild_id = guild.id
+    vc = guild.voice_client
     if not vc: return
 
     if guild_id in bot.queue and bot.queue[guild_id]:
         song = bot.queue[guild_id].pop(0)
-        await play_music(interaction, song)
+        await play_music(guild, channel, user, song)
     elif bot.autoplay.get(guild_id, False):
-        # ระบบ AutoPlay: ค้นหาเพลงที่คล้ายกัน (ในตัวอย่างนี้คือการสุ่มเพลงแนะนำ)
-        await interaction.channel.send("🔄 คิวว่าง.. กำลังเลือกเพลงถัดไปให้อัตโนมัติ", delete_after=5)
-        # จำลองการหาเพลงใหม่ (สามารถปรับแต่งให้ดึงจาก Related videos ได้)
-        search = "เพลงไทยยอดฮิต" 
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{search}", download=False)['entries'][0]
-            await play_music(interaction, info)
+        last_url = bot.last_song_url.get(guild_id)
+        if last_url:
+            await channel.send("🔄 คิวว่าง.. กำลังเลือกเพลงแนะนำให้ถัดไป", delete_after=5)
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                # ดึงเพลงที่เกี่ยวข้องจากวิดีโอล่าสุด
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={last_url.split('=')[-1]}&list=RD{last_url.split('=')[-1]}", download=False)
+                # เลือกเพลงที่ 2 ในลิสต์แนะนำ (เพลงแรกมักเป็นเพลงเดิม)
+                entry = info['entries'][1] if len(info['entries']) > 1 else info['entries'][0]
+                song_data = parse_song_data(entry)
+                await play_music(guild, channel, user, song_data)
+
+def parse_song_data(entry):
+    return {
+        'url': entry['url'],
+        'original_url': entry.get('webpage_url') or entry.get('url'),
+        'title': entry['title'],
+        'thumbnail': entry.get('thumbnail'),
+        'uploader': entry.get('uploader', 'Unknown'),
+        'duration_string': entry.get('duration_string', '00:00')
+    }
 
 @bot.tree.command(name="play", description="เล่นเพลง (ใส่ชื่อหรือลิงก์)")
 async def play(interaction: discord.Interaction, search: str):
@@ -135,21 +155,16 @@ async def play(interaction: discord.Interaction, search: str):
         try:
             info = ydl.extract_info(search, download=False)
             if 'entries' in info: info = info['entries'][0]
-            song_data = {
-                'url': info['url'], 
-                'title': info['title'], 
-                'thumbnail': info.get('thumbnail'),
-                'uploader': info.get('uploader'),
-                'duration_string': info.get('duration_string')
-            }
-        except: return await interaction.followup.send("❌ หาเพลงไม่เจอ")
+            song_data = parse_song_data(info)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ หาเพลงไม่เจอ: {e}")
 
     if vc.is_playing():
         bot.queue.setdefault(interaction.guild_id, []).append(song_data)
-        await interaction.followup.send(f"➕ เพิ่มเข้าคิว: {info['title']}")
+        await interaction.followup.send(f"➕ เพิ่มเข้าคิว: **{info['title']}**")
     else:
-        await interaction.followup.send("🎶 เริ่มการเล่นเพลง...", ephemeral=True)
-        await play_music(interaction, song_data)
+        await interaction.followup.send("🎶 กำลังเริ่มเล่น...", ephemeral=True)
+        await play_music(interaction.guild, interaction.channel, interaction.user, song_data)
 
 @bot.tree.command(name="queue", description="ดูรายการคิวเพลงปัจจุบัน")
 async def queue(interaction: discord.Interaction):
@@ -163,7 +178,7 @@ async def queue(interaction: discord.Interaction):
     embed = discord.Embed(title="รายการคิวเพลง", description=f"```\n{desc}\n```", color=0x3498db)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="autoplay", description="เปิด/ปิด การเล่นอัตโนมัติเมื่อคิวว่าง")
+@bot.tree.command(name="autoplay", description="เปิด/ปิด ระบบเล่นเพลงแนะนำอัตโนมัติ")
 async def autoplay(interaction: discord.Interaction):
     current = bot.autoplay.get(interaction.guild_id, False)
     bot.autoplay[interaction.guild_id] = not current
