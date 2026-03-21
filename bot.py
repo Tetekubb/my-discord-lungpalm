@@ -4,189 +4,180 @@ from discord import app_commands
 import yt_dlp
 import asyncio
 import static_ffmpeg
-import os  # เพิ่มเพื่อดึงค่าจาก Environment Variables
-from datetime import datetime, timedelta
+import os
+from datetime import datetime
 
-# --- [ตั้งค่า ID ทั้งหมด] ---
-# สำหรับ Railway: แนะนำให้ใส่ TOKEN ในหน้า Config Variables ของ Railway 
-# แล้วใช้ os.getenv('TOKEN') แทนการแปะลงไปตรงๆ ในโค้ด
-TOKEN = os.getenv('TOKEN') or 'ใส่_TOKEN_เดิม_ตรงนี้_ถ้ายังไม่เอาลง_Railway'
-
+# --- [Settings] ---
+TOKEN = os.getenv('TOKEN') or 'YOUR_TOKEN_HERE'
 MY_GUILD_ID = discord.Object(id=1470028388335882394)
-TARGET_CATEGORY_ID = 1482303742866100315 
-BLACKLIST_ROLE_ID = 1482330184395788331 
-LOG_CHANNEL_ID = 1483080342528196681
-UNBAN_CHANNEL_ID = 1482347205107908730  
 
-# --- [ตั้งค่าระบบเพลง] ---
-YDL_OPTIONS = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True, 'no_warnings': True, 'default_search': 'ytsearch', 'source_address': '0.0.0.0'}
-FFMPEG_OPTIONS = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+# --- [YTDL & FFMPEG Optimized] ---
+YDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+    'extract_flat': 'in_playlist', # ดึงข้อมูลไวขึ้น
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+class MusicView(discord.ui.View):
+    """คลาสสำหรับปุ่มควบคุมใต้ Embed เพลง"""
+    def __init__(self, bot, guild_id):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = guild_id
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc and vc.is_playing():
+            vc.stop()
+            await interaction.response.send_message("⏭️ ข้ามเพลงแล้ว", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ ไม่มีเพลงเล่นอยู่", ephemeral=True)
+
+    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc:
+            if vc.is_playing():
+                vc.pause()
+                await interaction.response.send_message("⏸️ พักเพลง", ephemeral=True)
+            elif vc.is_paused():
+                vc.resume()
+                await interaction.response.send_message("▶️ เล่นต่อ", ephemeral=True)
+
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc:
+            self.bot.queue[self.guild_id] = []
+            await vc.disconnect()
+            await interaction.response.send_message("⏹️ ปิดเพลงและออกจากห้อง", ephemeral=True)
 
 class MusicBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.all()
+        intents = discord.Intents.default()
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.warnings = {} 
-        self.queue = {}    
-        self.voice_log_id = None
-        self.server_log_id = None
+        self.queue = {}
+        self.autoplay = {} # เก็บสถานะ AutoPlay แยกเซิร์ฟเวอร์
 
     async def setup_hook(self):
         static_ffmpeg.add_paths()
         self.tree.copy_global_to(guild=MY_GUILD_ID)
         await self.tree.sync(guild=MY_GUILD_ID)
-        print(f"✅ บอทออนไลน์สมบูรณ์แบบ 100% พร้อมระบบ Log!")
+        print(f"✅ Kanopi Music System พร้อมทำงาน!")
 
 bot = MusicBot()
 
-# --- [1. คำสั่งตั้งค่าระบบ Log] ---
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setvoice(ctx, channel: discord.TextChannel):
-    bot.voice_log_id = channel.id
-    await ctx.send(f"✅ ตั้งค่าห้อง Log เสียงไปที่ {channel.mention}")
+def get_embed(info, interaction, status="กำลังเล่น"):
+    embed = discord.Embed(title="Kanopi Music System", color=0xff2d55)
+    embed.add_field(name="Now playing:", value=f"```\n{info['title']}\n```", inline=False)
+    embed.add_field(name="Author:", value=f"└ {info.get('uploader', 'Unknown')}", inline=True)
+    embed.add_field(name="Duration:", value=f"└ {info.get('duration_string', '00:00')}", inline=True)
+    embed.add_field(name="Requester:", value=f"└ {interaction.user.mention}", inline=True)
+    if 'thumbnail' in info:
+        embed.set_image(url=info['thumbnail'])
+    return embed
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def setlog(ctx, channel: discord.TextChannel):
-    bot.server_log_id = channel.id
-    await ctx.send(f"✅ ตั้งค่าห้อง Log เซิร์ฟเวอร์ไปที่ {channel.mention}")
+async def play_music(interaction, song):
+    vc = interaction.guild.voice_client
+    if not vc: return
 
-# --- [2. ระบบ Log เหตุการณ์ต่างๆ] ---
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if not bot.voice_log_id: return
-    channel = bot.get_channel(bot.voice_log_id)
-    if not channel: return
-    embed = discord.Embed(timestamp=datetime.now())
-    if before.channel is None and after.channel is not None:
-        embed.title, embed.description, embed.color = "📥 เข้าห้องเสียง", f"**{member}** เข้าห้อง `{after.channel.name}`", discord.Color.green()
-    elif before.channel is not None and after.channel is None:
-        embed.title, embed.description, embed.color = "📤 ออกจากห้องเสียง", f"**{member}** ออกจากห้อง `{before.channel.name}`", discord.Color.red()
-    elif before.channel != after.channel:
-        embed.title, embed.description, embed.color = "🔄 ย้ายห้องเสียง", f"**{member}** ย้ายจาก `{before.channel.name}` ➡️ `{after.channel.name}`", discord.Color.blue()
-    else: return
-    await channel.send(embed=embed)
+    # ปรับปรุงระบบ Volume เพื่อแก้บัคเสียงเบา/แตก
+    source = discord.PCMVolumeTransformer(await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS))
+    source.volume = 0.8 # ตั้งค่าเริ่มต้น 80%
 
-@bot.event
-async def on_message_edit(before, after):
-    if after.author.bot or not bot.server_log_id or before.content == after.content: return
-    channel = bot.get_channel(bot.server_log_id)
-    if not channel: return
-    embed = discord.Embed(title="📝 แก้ไขข้อความ", color=discord.Color.orange(), timestamp=datetime.now())
-    embed.set_author(name=after.author, icon_url=after.author.display_avatar.url)
-    embed.add_field(name="ก่อนแก้ไข", value=before.content or "ไม่มีข้อความ", inline=False)
-    embed.add_field(name="หลังแก้ไข", value=after.content or "ไม่มีข้อความ", inline=False)
-    embed.add_field(name="ห้อง", value=after.channel.mention)
-    await channel.send(embed=embed)
+    def after_playing(error):
+        asyncio.run_coroutine_threadsafe(next_song(interaction), bot.loop)
 
-@bot.event
-async def on_member_update(before, after):
-    if before.nick != after.nick and bot.server_log_id:
-        channel = bot.get_channel(bot.server_log_id)
-        if not channel: return
-        embed = discord.Embed(title="👤 เปลี่ยนชื่อเล่น", color=discord.Color.magenta(), timestamp=datetime.now())
-        embed.set_author(name=after, icon_url=after.display_avatar.url)
-        embed.add_field(name="ชื่อเดิม", value=before.nick or before.name)
-        embed.add_field(name="ชื่อใหม่", value=after.nick or after.name)
-        await channel.send(embed=embed)
+    vc.play(source, after=after_playing)
+    view = MusicView(bot, interaction.guild_id)
+    await interaction.channel.send(embed=get_embed(song, interaction), view=view)
 
-# --- [3. ระบบ Blacklist & Log ลบข้อความ] ---
-@bot.event
-async def on_message(message):
-    if message.author.bot: return
-    if message.channel.category_id == TARGET_CATEGORY_ID:
-        if any(role.id == BLACKLIST_ROLE_ID for role in message.author.roles):
-            try:
-                await message.delete()
-                return
-            except: pass
-    await bot.process_commands(message)
+async def next_song(interaction):
+    guild_id = interaction.guild_id
+    vc = interaction.guild.voice_client
+    if not vc: return
 
-@bot.event
-async def on_message_delete(message):
-    if message.author.bot: return
-    if bot.server_log_id:
-        log_ch = bot.get_channel(bot.server_log_id)
-        if log_ch:
-            embed = discord.Embed(title="🗑️ ลบข้อความ", color=discord.Color.red(), timestamp=datetime.now())
-            embed.set_author(name=message.author, icon_url=message.author.display_avatar.url)
-            embed.description = f"**เนื้อหา:** {message.content or 'ไม่มีข้อความ'}\n**ห้อง:** {message.channel.mention}"
-            await log_ch.send(embed=embed)
+    if guild_id in bot.queue and bot.queue[guild_id]:
+        song = bot.queue[guild_id].pop(0)
+        await play_music(interaction, song)
+    elif bot.autoplay.get(guild_id, False):
+        # ระบบ AutoPlay: ค้นหาเพลงที่คล้ายกัน (ในตัวอย่างนี้คือการสุ่มเพลงแนะนำ)
+        await interaction.channel.send("🔄 คิวว่าง.. กำลังเลือกเพลงถัดไปให้อัตโนมัติ", delete_after=5)
+        # จำลองการหาเพลงใหม่ (สามารถปรับแต่งให้ดึงจาก Related videos ได้)
+        search = "เพลงไทยยอดฮิต" 
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{search}", download=False)['entries'][0]
+            await play_music(interaction, info)
 
-    if message.channel.category_id == TARGET_CATEGORY_ID:
-        if any(role.id == BLACKLIST_ROLE_ID for role in message.author.roles): return
-        uid, now = message.author.id, datetime.now()
-        if uid in bot.warnings and now - bot.warnings[uid]['last_time'] > timedelta(hours=1):
-            bot.warnings[uid] = {'count': 0, 'last_time': now}
-        if uid not in bot.warnings:
-            bot.warnings[uid] = {'count': 1, 'last_time': now}
-        else:
-            bot.warnings[uid]['count'] += 1
-            bot.warnings[uid]['last_time'] = now
-
-        count = bot.warnings[uid]['count']
-        if count == 1:
-            await message.channel.send(f"⚠️ {message.author.mention} **อย่าลบข้อความตอนประมูล!** (เตือนครั้งที่ 1/2)", delete_after=15)
-        elif count >= 2:
-            role = message.guild.get_role(BLACKLIST_ROLE_ID)
-            if role:
-                try:
-                    await message.author.add_roles(role)
-                    bot.warnings[uid]['count'] = 0 
-                    log_black = bot.get_channel(LOG_CHANNEL_ID)
-                    if log_black:
-                        embed = discord.Embed(title="🚫 ประกาศ Blacklist", description=f"สมาชิก {message.author.mention} ทำผิดกฎการลบข้อความประมูล", color=0xff0000, timestamp=now)
-                        embed.set_thumbnail(url=message.author.display_avatar.url)
-                        embed.add_field(name="📌 สาเหตุ", value="ลบข้อความในห้องประมูล (2/2)", inline=False)
-                        embed.add_field(name="🔓 การปลด", value=f"ติดต่อที่ <#{UNBAN_CHANNEL_ID}>", inline=True)
-                        view = discord.ui.View()
-                        view.add_item(discord.ui.Button(label="ไปที่ห้องปลด Blacklist", url=f"https://discord.com/channels/{message.guild.id}/{UNBAN_CHANNEL_ID}"))
-                        await log_black.send(embed=embed, view=view)
-                except: pass
-
-# --- [4. ระบบเพลง] ---
-async def play_next(interaction):
-    gid = interaction.guild_id
-    if gid in bot.queue and bot.queue[gid]:
-        song = bot.queue[gid].pop(0)
-        vc = interaction.guild.voice_client
-        if vc:
-            source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
-            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), bot.loop))
-            await interaction.channel.send(f"🎶 เพลงถัดไป: **{song['title']}**")
-
-@bot.tree.command(name="play", description="เล่นเพลงจาก YouTube")
+@bot.tree.command(name="play", description="เล่นเพลง (ใส่ชื่อหรือลิงก์)")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
-    if not interaction.user.voice: return await interaction.followup.send("❌ เข้าห้องเสียงก่อนนะ!")
+    
+    if not interaction.user.voice:
+        return await interaction.followup.send("❌ เข้าห้องเสียงก่อน!")
+
     vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
         try:
             info = ydl.extract_info(search, download=False)
             if 'entries' in info: info = info['entries'][0]
-            url, title = info['url'], info['title']
-        except Exception: return await interaction.followup.send(f"❌ หาเพลงไม่เจอ")
-    source = await discord.FFmpegOpusAudio.from_probe(url, **FFMPEG_OPTIONS)
+            song_data = {
+                'url': info['url'], 
+                'title': info['title'], 
+                'thumbnail': info.get('thumbnail'),
+                'uploader': info.get('uploader'),
+                'duration_string': info.get('duration_string')
+            }
+        except: return await interaction.followup.send("❌ หาเพลงไม่เจอ")
+
     if vc.is_playing():
-        bot.queue.setdefault(interaction.guild_id, []).append({'url': url, 'title': title})
-        await interaction.followup.send(f"➕ เพิ่มเข้าคิว: **{title}**")
+        bot.queue.setdefault(interaction.guild_id, []).append(song_data)
+        await interaction.followup.send(f"➕ เพิ่มเข้าคิว: {info['title']}")
     else:
-        vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(play_next(interaction), bot.loop))
-        await interaction.followup.send(f"▶️ กำลังเล่น: **{title}**")
+        await interaction.followup.send("🎶 เริ่มการเล่นเพลง...", ephemeral=True)
+        await play_music(interaction, song_data)
 
-@bot.tree.command(name="skip", description="ข้ามเพลง")
-async def skip(interaction: discord.Interaction):
-    vc = interaction.guild.voice_client
-    if vc and vc.is_playing(): vc.stop(); await interaction.response.send_message("⏭️ ข้ามเพลงเรียบร้อย")
-    else: await interaction.response.send_message("❌ ไม่มีเพลงเล่นอยู่")
+@bot.tree.command(name="queue", description="ดูรายการคิวเพลงปัจจุบัน")
+async def queue(interaction: discord.Interaction):
+    q = bot.queue.get(interaction.guild_id, [])
+    if not q: return await interaction.response.send_message("ขณะนี้ไม่มีคิวเพลง")
+    
+    desc = ""
+    for i, s in enumerate(q[:10], 1):
+        desc += f"{i}. {s['title']}\n"
+    
+    embed = discord.Embed(title="รายการคิวเพลง", description=f"```\n{desc}\n```", color=0x3498db)
+    await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="stop", description="หยุดเพลงและล้างคิว")
-async def stop(interaction: discord.Interaction):
+@bot.tree.command(name="autoplay", description="เปิด/ปิด การเล่นอัตโนมัติเมื่อคิวว่าง")
+async def autoplay(interaction: discord.Interaction):
+    current = bot.autoplay.get(interaction.guild_id, False)
+    bot.autoplay[interaction.guild_id] = not current
+    status = "เปิด ✅" if not current else "ปิด ❌"
+    await interaction.response.send_message(f"ระบบ AutoPlay: {status}")
+
+@bot.tree.command(name="volume", description="ปรับระดับเสียง (0-100)")
+async def volume(interaction: discord.Interaction, percent: int):
     vc = interaction.guild.voice_client
-    if vc:
-        await vc.disconnect(); bot.queue[interaction.guild_id] = []
-        await interaction.response.send_message("⏹️ ออกจากห้องเสียงแล้ว")
-    else: await interaction.response.send_message("❌ บอทไม่ได้อยู่ในห้องเสียง")
+    if not vc or not vc.source:
+        return await interaction.response.send_message("❌ บอทไม่ได้เล่นเพลงอยู่")
+    
+    if 0 <= percent <= 100:
+        vc.source.volume = percent / 100
+        await interaction.response.send_message(f"🔊 ปรับเสียงเป็น {percent}%")
+    else:
+        await interaction.response.send_message("❌ กรุณาใส่ตัวเลข 0-100")
 
 bot.run(TOKEN)
