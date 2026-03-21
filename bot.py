@@ -11,6 +11,7 @@ static_ffmpeg.add_paths()
 TOKEN = os.getenv('TOKEN')
 MY_GUILD_ID = discord.Object(id=1467879682019033088) 
 
+# ปรับ Options เพื่อใช้คุกกี้แก้บั๊กโดนบล็อก
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
@@ -19,12 +20,11 @@ YDL_OPTIONS = {
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'extract_flat': False,
-    # แก้ปัญหา No supported JavaScript runtime
-    'youtube_include_dash_manifest': False,
+    # ดึงคุกกี้จากไฟล์เพื่อแก้ปัญหา 'Sign in to confirm you’re not a bot'
+    'cookiefile': 'cookies.txt', 
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
 }
 
-# แก้ไข FFMPEG_OPTIONS: ตัด codec copy ออกเพื่อให้ Filter volume ใช้งานได้
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -filter:a "volume=0.7"' 
@@ -105,7 +105,6 @@ async def play_engine(guild, channel, user, song):
     vc = guild.voice_client
     if not vc: return
     try:
-        # ใช้จาก probe เพื่อดึงข้อมูลเสียงให้เสถียรที่สุด
         source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
         vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(next_song(guild, channel, user), bot.loop))
         await channel.send(embed=get_full_embed(song, user), view=TeteControlView(bot, guild.id))
