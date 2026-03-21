@@ -9,7 +9,7 @@ import os
 # --- [Core Setup] ---
 static_ffmpeg.add_paths()
 TOKEN = os.getenv('TOKEN') # ดึงจาก Variable ใน Railway
-MY_GUILD_ID = discord.Object(id=1470028388335882394)
+MY_GUILD_ID = discord.Object(id=1467879682019033088)
 
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
