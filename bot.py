@@ -19,12 +19,15 @@ YDL_OPTIONS = {
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'extract_flat': False,
+    # แก้ปัญหา No supported JavaScript runtime
+    'youtube_include_dash_manifest': False,
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
 }
 
+# แก้ไข FFMPEG_OPTIONS: ตัด codec copy ออกเพื่อให้ Filter volume ใช้งานได้
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=0.6"'
+    'options': '-vn -filter:a "volume=0.7"' 
 }
 
 # --- [2. UI & Control View] ---
@@ -102,6 +105,7 @@ async def play_engine(guild, channel, user, song):
     vc = guild.voice_client
     if not vc: return
     try:
+        # ใช้จาก probe เพื่อดึงข้อมูลเสียงให้เสถียรที่สุด
         source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
         vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(next_song(guild, channel, user), bot.loop))
         await channel.send(embed=get_full_embed(song, user), view=TeteControlView(bot, guild.id))
@@ -133,14 +137,11 @@ async def play(interaction: discord.Interaction, search: str):
 
     vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
 
-    # แก้ไขตรรกะการค้นหา: ถ้าเป็นลิ้งก์ให้ใช้ลิ้งก์ตรง ถ้าไม่ใช่ค่อยค้นหา
     query = search if search.startswith(('http://', 'https://')) else f"ytsearch1:{search}"
 
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
         try:
             info = ydl.extract_info(query, download=False)
-            
-            # ตรวจสอบผลลัพธ์จากการค้นหาหรือลิ้งก์ตรง
             if 'entries' in info:
                 if not info['entries']:
                     return await interaction.followup.send(f"❌ หาเพลง **'{search}'** ไม่เจอครับ")
