@@ -59,7 +59,6 @@ class TeteMusicView(discord.ui.View):
                 vc.resume()
                 await interaction.response.send_message("▶️ **เล่นต่อ**", ephemeral=True)
 
-# --- [Bot Class] ---
 class MusicBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -77,14 +76,14 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
-# --- [Music Functions] ---
+# --- [Music Engine] ---
 def create_embed(song, user, status="Now Playing"):
     embed = discord.Embed(title="🎵 Tete Music System", color=0xff0055)
     embed.set_image(url="https://media.discordapp.net/attachments/1118943144889618534/1213054545622319134/standard_1.gif") # Banner
     embed.description = f"**{status}:**\n```\n{song['title']}\n```"
     embed.add_field(name="ศิลปิน:", value=f"╰─ **{song['uploader']}**", inline=True)
-    embed.add_field(name="ความยาว:", value=f"╰─ `{song['duration']}`", inline=True)
-    embed.add_field(name="คนขอ:", value=f"╰─ {user.mention}", inline=True)
+    embed.add_field(name="เวลา:", value=f"╰─ `{song['duration']}`", inline=True)
+    embed.add_field(name="ขอโดย:", value=f"╰─ {user.mention}", inline=True)
     if song.get('thumbnail'): embed.set_thumbnail(url=song['thumbnail'])
     return embed
 
@@ -109,7 +108,11 @@ async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
     if not interaction.user.voice: return await interaction.followup.send("❌ เข้าห้องเสียงก่อนนะพี่!")
     
-    vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+    # แก้ปัญหา davey library needed โดยการใช้ try-except ครอบการ connect
+    try:
+        vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
+    except Exception as e:
+        return await interaction.followup.send(f"❌ บอทเข้าห้องไม่ได้ (ขาด Library): {e}")
     
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
         try:
