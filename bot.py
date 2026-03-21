@@ -6,18 +6,17 @@ import asyncio
 import static_ffmpeg
 import os
 
-# --- [ระบบพื้นฐาน] ---
+# --- [Core Setup] ---
 static_ffmpeg.add_paths()
 TOKEN = os.getenv('TOKEN')
 MY_GUILD_ID = discord.Object(id=1470028388335882394)
 
-# --- [YTDL & FFMPEG Optimized] ---
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
+    'extract_flat': True,
     'default_search': 'ytsearch',
-    'extract_flat': True, # ช่วยให้ดึงข้อมูลไวขึ้นมาก
 }
 
 FFMPEG_OPTIONS = {
@@ -25,53 +24,49 @@ FFMPEG_OPTIONS = {
     'options': '-vn'
 }
 
-class MusicView(discord.ui.View):
+class TeteMusicView(discord.ui.View):
     def __init__(self, bot, guild_id):
         super().__init__(timeout=None)
         self.bot = bot
         self.guild_id = guild_id
 
     @discord.ui.button(emoji="🛑", style=discord.ButtonStyle.danger)
-    async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if vc:
             self.bot.queue[self.guild_id] = []
             await vc.disconnect()
-            await interaction.response.send_message("⏹️ หยุดเล่นและออกจากห้อง", ephemeral=True)
+            await interaction.response.send_message("⏹️ **หยุดเล่นและล้างคิวแล้ว**", ephemeral=True)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
-    async def skip_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if vc and vc.is_playing():
             vc.stop()
-            await interaction.response.send_message("⏭️ ข้ามเพลงเรียบร้อย", ephemeral=True)
+            await interaction.response.send_message("⏭️ **ข้ามเพลง**", ephemeral=True)
 
     @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary)
-    async def pause_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def pause(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = interaction.guild.voice_client
         if vc:
             if vc.is_playing():
                 vc.pause()
-                await interaction.response.send_message("⏸️ พักเพลง", ephemeral=True)
+                await interaction.response.send_message("⏸️ **พักเพลง**", ephemeral=True)
             elif vc.is_paused():
                 vc.resume()
-                await interaction.response.send_message("▶️ เล่นต่อ", ephemeral=True)
+                await interaction.response.send_message("▶️ **เล่นต่อ**", ephemeral=True)
 
-    @discord.ui.button(label="AutoPlay", emoji="🔄", style=discord.ButtonStyle.success)
-    async def autoplay_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="AutoPlay", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def autoplay(self, interaction: discord.Interaction, button: discord.ui.Button):
         current = self.bot.autoplay.get(self.guild_id, False)
         self.bot.autoplay[self.guild_id] = not current
-        status = "เปิด ✅" if not current else "ปิด ❌"
-        await interaction.response.send_message(f"ระบบ AutoPlay: {status}", ephemeral=True)
+        button.style = discord.ButtonStyle.success if not current else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+        await interaction.followup.send(f"🔄 **AutoPlay: {'เปิด' if not current else 'ปิด'}**", ephemeral=True)
 
-    @discord.ui.button(label="Queue", emoji="📋", style=discord.ButtonStyle.primary)
-    async def queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        q = self.bot.queue.get(self.guild_id, [])
-        if not q:
-            return await interaction.response.send_message("ขณะนี้ไม่มีคิวเพลง", ephemeral=True)
-        desc = "\n".join([f"{i+1}. {s['title']}" for i, s in enumerate(q[:10])])
-        embed = discord.Embed(title="รายการคิวเพลง (10 เพลงแรก)", description=f"```\n{desc}\n```", color=0x3498db)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    @discord.ui.button(label="Donate", emoji="💰", style=discord.ButtonStyle.success)
+    async def donate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("🙏 ขอบคุณที่สนับสนุน Tete Shop ครับ! [ลิงก์โดเนท]", ephemeral=True)
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -85,49 +80,69 @@ class MusicBot(commands.Bot):
     async def setup_hook(self):
         self.tree.copy_global_to(guild=MY_GUILD_ID)
         await self.tree.sync(guild=MY_GUILD_ID)
-        print(f"✅ บอทระบบเพลงออนไลน์แล้ว!")
+        print(f"✅ Tete Music System Ready!")
 
 bot = MusicBot()
 
-async def play_next(guild, channel, user):
-    guild_id = guild.id
-    if guild_id in bot.queue and bot.queue[guild_id]:
-        song = bot.queue[guild_id].pop(0)
-        await start_playing(guild, channel, user, song)
-    elif bot.autoplay.get(guild_id, False):
-        # AutoPlay สุ่มเพลงที่เกี่ยวข้องจากชื่อเพลงล่าสุด
-        last = bot.last_track.get(guild_id)
-        if last:
-            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                info = ydl.extract_info(f"ytsearch1:เพลงที่คล้ายกับ {last['title']}", download=False)['entries'][0]
-                song_data = {'url': info['url'], 'title': info['title'], 'thumbnail': info.get('thumbnail'), 'duration': info.get('duration_string', '00:00')}
-                await start_playing(guild, channel, user, song_data)
+def get_main_embed(song, user, guild):
+    embed = discord.Embed(title="🎵 Tete Music System", color=0xff0055)
+    embed.description = f"**Now playing:**\n```\n{song['title']}\n```"
+    embed.add_field(name="Author:", value=f"╰─ **{song['uploader']}**", inline=True)
+    embed.add_field(name="Duration:", value=f"╰─ `{song['duration']}`", inline=True)
+    embed.add_field(name="Room:", value=f"╰─ <#{guild.voice_client.channel.id if guild.voice_client else 'undefined'}>", inline=True)
+    embed.add_field(name="Requester:", value=f"╰─ {user.mention}", inline=True)
+    embed.add_field(name="Web:", value="╰─ [รายละเอียด](https://tetewebshop.com)", inline=True)
+    
+    if song.get('thumbnail'):
+        embed.set_image(url=song['thumbnail'])
+    return embed
 
-async def start_playing(guild, channel, user, song):
+async def play_music(guild, channel, user, song):
     vc = guild.voice_client
     if not vc: return
     
     bot.last_track[guild.id] = song
-    source = discord.PCMVolumeTransformer(await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS))
-    source.volume = 0.8 # ป้องกันเสียงแตก
+    try:
+        source = discord.PCMVolumeTransformer(await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS))
+        source.volume = 0.8
+        
+        def after_func(e):
+            asyncio.run_coroutine_threadsafe(check_queue(guild, channel, user), bot.loop)
+            
+        vc.play(source, after=after_func)
+        await channel.send(embed=get_main_embed(song, user, guild), view=TeteMusicView(bot, guild.id))
+    except Exception as e:
+        print(f"Error: {e}")
 
-    def after_func(e):
-        asyncio.run_coroutine_threadsafe(play_next(guild, channel, user), bot.loop)
+async def check_queue(guild, channel, user):
+    if guild.id in bot.queue and bot.queue[guild.id]:
+        song = bot.queue[guild.id].pop(0)
+        await play_music(guild, channel, user, song)
+    elif bot.autoplay.get(guild.id, False):
+        # ระบบ AutoPlay ดึงเพลงแนะนำจริงจาก YouTube
+        last = bot.last_track.get(guild.id)
+        search_query = f"เพลงแนะนำจาก {last['title']}" if last else "เพลงฮิต"
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(f"ytsearch1:{search_query}", download=False)['entries'][0]
+            song_data = {'url': info['url'], 'title': info['title'], 'uploader': info.get('uploader', 'Unknown'), 'thumbnail': info.get('thumbnail'), 'duration': info.get('duration_string', '00:00')}
+            await play_music(guild, channel, user, song_data)
 
-    vc.play(source, after=after_func)
+@bot.tree.command(name="setup", description="สร้างห้องสำหรับเล่นเพลงโดยเฉพาะ")
+async def setup(interaction: discord.Interaction):
+    overwrites = {
+        interaction.guild.default_role: discord.PermissionOverwrite(send_messages=False),
+        interaction.guild.me: discord.PermissionOverwrite(send_messages=True)
+    }
+    channel = await interaction.guild.create_text_channel('🎵-tete-music', overwrites=overwrites)
     
-    embed = discord.Embed(title="Kanopi Music System", color=0xff2d55)
-    embed.add_field(name="Now playing:", value=f"```\n{song['title']}\n```", inline=False)
-    embed.add_field(name="Duration:", value=f"└ {song['duration']}", inline=True)
-    embed.add_field(name="Requester:", value=f"└ {user.mention}", inline=True)
-    if song['thumbnail']: embed.set_image(url=song['thumbnail'])
-    
-    await channel.send(embed=embed, view=MusicView(bot, guild.id))
+    embed = discord.Embed(title="Tete Music Setup", description="ส่งลิงก์เพลงในห้องนี้เพื่อเริ่มฟังเพลงได้เลย!", color=0x00ff00)
+    await channel.send(embed=embed)
+    await interaction.response.send_message(f"สร้างห้อง <#{channel.id}> เรียบร้อยแล้ว!", ephemeral=True)
 
-@bot.tree.command(name="play", description="สั่งเล่นเพลงจาก YouTube")
+@bot.tree.command(name="play", description="เล่นเพลง")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
-    if not interaction.user.voice: return await interaction.followup.send("❌ คุณต้องเข้าห้องเสียงก่อน!")
+    if not interaction.user.voice: return await interaction.followup.send("❌ เข้าห้องเสียงก่อนนะ!")
     
     vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
     
@@ -135,14 +150,14 @@ async def play(interaction: discord.Interaction, search: str):
         try:
             info = ydl.extract_info(search, download=False)
             if 'entries' in info: info = info['entries'][0]
-            song = {'url': info['url'], 'title': info['title'], 'thumbnail': info.get('thumbnail'), 'duration': info.get('duration_string', '00:00')}
-        except: return await interaction.followup.send("❌ หาเพลงไม่เจอครับ")
+            song = {'url': info['url'], 'title': info['title'], 'uploader': info.get('uploader'), 'thumbnail': info.get('thumbnail'), 'duration': info.get('duration_string')}
+        except: return await interaction.followup.send("❌ หาเพลงไม่เจอ")
 
     if vc.is_playing():
         bot.queue.setdefault(interaction.guild_id, []).append(song)
         await interaction.followup.send(f"➕ เพิ่มเข้าคิว: **{song['title']}**")
     else:
         await interaction.followup.send("🎶 เริ่มการเล่น...", ephemeral=True)
-        await start_playing(interaction.guild, interaction.channel, interaction.user, song)
+        await play_music(interaction.guild, interaction.channel, interaction.user, song)
 
 bot.run(TOKEN)
