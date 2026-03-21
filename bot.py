@@ -5,6 +5,8 @@ import yt_dlp
 import asyncio
 import static_ffmpeg
 import os
+import static_ffmpeg
+static_ffmpeg.add_paths()
 from datetime import datetime
 
 # --- [Settings] ---
