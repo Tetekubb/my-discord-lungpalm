@@ -14,20 +14,20 @@ MY_GUILD_ID = discord.Object(id=1467879682019033088)
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
+    'quiet': False,
+    'no_warnings': False,
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'extract_flat': False,
-    'cookiefile': 'cookies.txt', # ต้องมีไฟล์นี้ในโฟลเดอร์เดียวกับ bot.py นะพี่
+    # ใช้ Android TV Client เพื่อเลี่ยงการโดนถามหาคุกกี้ (Bot Detection)
+    'extractor_args': {'youtube': {'player_client': ['android_vr', 'web']}},
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36'
 }
 
-# --- [จุดที่แก้: แก้ให้เสียงออกแน่นอน] ---
+# แก้ไข FFMPEG_OPTIONS: ตัด -c:a copy ออก เพื่อให้เสียงออก 100%
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    # ตัด -c:a copy ออก และใช้ filter ปรับเสียงให้ดังพอดี (0.8)
-    'options': '-vn -filter:a "volume=0.8" -loglevel error' 
+    'options': '-vn -filter:a "volume=0.8"' 
 }
 
 # --- [2. UI & Control View] ---
@@ -86,7 +86,7 @@ class MusicBot(commands.Bot):
     async def setup_hook(self):
         self.tree.copy_global_to(guild=MY_GUILD_ID)
         await self.tree.sync(guild=MY_GUILD_ID)
-        print(f"✅ Tete Music Online! พร้อมใช้งาน")
+        print(f"✅ Tete Music Online! (beareiei_ Edition)")
 
 bot = MusicBot()
 
@@ -105,7 +105,7 @@ async def play_engine(guild, channel, user, song):
     vc = guild.voice_client
     if not vc: return
     try:
-        # ใช้ FFmpegOpusAudio เพื่อคุณภาพเสียงที่ดีและเสถียรบน Discord
+        # ใช้ FFmpegOpusAudio เพื่อให้เสียงออกแน่นอนและเสถียร
         source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
         vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(next_song(guild, channel, user), bot.loop))
         await channel.send(embed=get_full_embed(song, user), view=TeteControlView(bot, guild.id))
@@ -136,7 +136,6 @@ async def play(interaction: discord.Interaction, search: str):
         return await interaction.followup.send("❌ พี่เข้าห้องเสียงก่อนนะ!")
 
     vc = interaction.guild.voice_client or await interaction.user.voice.channel.connect(self_deaf=True)
-
     query = search if search.startswith(('http://', 'https://')) else f"ytsearch1:{search}"
 
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
@@ -159,7 +158,7 @@ async def play(interaction: discord.Interaction, search: str):
                 bot.queue.setdefault(interaction.guild_id, []).append(song)
                 await interaction.followup.send(f"➕ เพิ่มเข้าคิว: **{song['title']}**")
             else:
-                await interaction.followup.send("🎶 กำลังเริ่มเล่น...", ephemeral=True)
+                await interaction.followup.send("🎶 กำลังเริ่มร้องเพลงครับพี่...", ephemeral=True)
                 await play_engine(interaction.guild, interaction.channel, interaction.user, song)
         except Exception as e:
             await interaction.followup.send(f"❌ Error: {str(e)[:50]}...")
