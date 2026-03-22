@@ -21,20 +21,32 @@ now_playing = {}
 # autoplay on/off per guild
 autoplay_enabled = {}
 
-YDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'extract_flat': False,
-    'cookiefile': 'cookies.txt',
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'web']
+def build_ydl_options():
+    opts = {
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'noplaylist': True,
+        'nocheckcertificate': True,
+        'ignoreerrors': False,
+        'extract_flat': False,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
         }
     }
-}
+    # ใส่ cookies เฉพาะเมื่อไฟล์มีอยู่และถูก format (Netscape)
+    if os.path.exists('cookies.txt'):
+        with open('cookies.txt', 'r', errors='ignore') as f:
+            first_line = f.readline().strip()
+        if 'Netscape' in first_line or first_line.startswith('#'):
+            opts['cookiefile'] = 'cookies.txt'
+            print("✅ ใช้ cookies.txt")
+        else:
+            print("⚠️  cookies.txt ผิด format — ข้ามการใช้ cookies")
+    else:
+        print("⚠️  ไม่พบ cookies.txt — โหลดแบบไม่มี cookies")
+    return opts
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -163,7 +175,7 @@ async def fetch_song(search):
     query = search if search.startswith("http") else f"ytsearch1:{search}"
     try:
         loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        with yt_dlp.YoutubeDL(build_ydl_options()) as ydl:
             info = await loop.run_in_executor(
                 None, lambda: ydl.extract_info(query, download=False)
             )
