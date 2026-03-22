@@ -15,10 +15,20 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 queue = {}
 
+# 🔥 FIX: กัน YouTube บล็อก + รองรับ cookies
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'quiet': True,
-    'noplaylist': True
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'extract_flat': False,
+    'cookiefile': 'cookies.txt',  # ถ้ามีจะช่วยได้มาก
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web']
+        }
+    }
 }
 
 FFMPEG_OPTIONS = {
@@ -35,7 +45,9 @@ def embed_now(song, user):
     )
     e.add_field(name="👤 User", value=user.mention)
     e.add_field(name="⏱️ Time", value=song['duration'])
+    e.add_field(name="📊 Status", value="🟢 Playing")
     e.set_thumbnail(url=song.get("thumbnail"))
+    e.set_footer(text="Tete Music System")
     return e
 
 def embed_queue(song):
@@ -60,10 +72,10 @@ class Control(discord.ui.View):
     @discord.ui.button(label="⏸️/▶️", style=discord.ButtonStyle.success)
     async def pause(self, interaction, button):
         vc = interaction.guild.voice_client
-        if vc.is_playing():
+        if vc and vc.is_playing():
             vc.pause()
             await interaction.response.send_message("⏸️ Pause", ephemeral=True)
-        elif vc.is_paused():
+        elif vc and vc.is_paused():
             vc.resume()
             await interaction.response.send_message("▶️ Resume", ephemeral=True)
 
@@ -86,7 +98,14 @@ async def play_song(guild, channel, song, user):
     if not vc:
         return
 
-    source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
+    try:
+        source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
+    except Exception as e:  # 🔥 FIX กันเสียงพัง
+        await channel.send(embed=discord.Embed(
+            description="❌ เล่นเพลงไม่ได้",
+            color=0xff0000
+        ))
+        return
 
     vc.play(
         source,
@@ -99,7 +118,10 @@ async def play_song(guild, channel, song, user):
 # ---------------- PLAY ----------------
 async def handle_play(message, search):
     if not message.author.voice:
-        return await message.channel.send("❌ เข้าห้องก่อน")
+        return await message.channel.send(embed=discord.Embed(
+            description="❌ เข้าห้องก่อน",
+            color=0xff0000
+        ))
 
     vc = message.guild.voice_client
     if not vc:
@@ -107,9 +129,15 @@ async def handle_play(message, search):
 
     query = search if search.startswith("http") else f"ytsearch1:{search}"
 
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(query, download=False)
-        data = info['entries'][0] if 'entries' in info else info
+    try:  # 🔥 FIX กัน yt-dlp พัง
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(query, download=False)
+            data = info['entries'][0] if 'entries' in info else info
+    except Exception as e:
+        return await message.channel.send(embed=discord.Embed(
+            description="❌ โหลดเพลงไม่ได้ (YouTube บล็อก)",
+            color=0xff0000
+        ))
 
     song = {
         'url': data['url'],
@@ -153,12 +181,14 @@ async def setup(ctx):
         color=0x0f0f0f
     )
 
+    embed.add_field(name="📌 Status", value="🟢 พร้อมใช้งาน", inline=False)
+
     await channel.send(embed=embed, view=Control(ctx.guild.id))
     await ctx.send(f"✅ สร้าง {channel.mention}")
 
 # ---------------- READY ----------------
 @bot.event
 async def on_ready():
-    print("🔥 Bot Ready")
+    print(f"🔥 Bot Ready: {bot.user}")
 
 bot.run(TOKEN)
