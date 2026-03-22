@@ -4,6 +4,7 @@ import yt_dlp
 import asyncio
 import static_ffmpeg
 import os
+import random
 
 static_ffmpeg.add_paths()
 TOKEN = os.getenv("TOKEN")
@@ -13,7 +14,12 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# queue[guild_id] = [(song, user), ...]
 queue = {}
+# เก็บเพลงที่กำลังเล่นอยู่
+now_playing = {}
+# autoplay on/off per guild
+autoplay_enabled = {}
 
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
@@ -35,6 +41,17 @@ FFMPEG_OPTIONS = {
     'options': '-vn'
 }
 
+# เพลงสุ่มสำหรับ autoplay (เพิ่มได้เลย)
+AUTOPLAY_SEEDS = [
+    "lofi hip hop chill",
+    "jazz relaxing music",
+    "phonk music mix",
+    "city pop playlist",
+    "anime ost mix",
+    "synthwave mix",
+    "thai indie music",
+]
+
 # ---------------- EMBED ----------------
 def embed_now(song, user):
     e = discord.Embed(
@@ -43,83 +60,113 @@ def embed_now(song, user):
         color=0x0f0f0f
     )
     e.add_field(name="👤 User", value=user.mention)
-    e.add_field(name="⏱️ Time", value=song['duration'])
+    e.add_field(name="⏱️ Duration", value=song['duration'])
     e.add_field(name="📊 Status", value="🟢 Playing")
     e.set_thumbnail(url=song.get("thumbnail"))
     e.set_footer(text="Tete Music System")
     return e
 
-def embed_queue(song):
+def embed_queue(song, position):
     return discord.Embed(
-        description=f"➕ Added to queue\n```{song['title']}```",
+        description=f"➕ Added to queue (#{position})\n```{song['title']}```",
         color=0x00ffaa
     )
 
-# ---------------- CONTROL ----------------
+def embed_error(msg):
+    return discord.Embed(description=f"❌ {msg}", color=0xff0000)
+
+def embed_info(msg):
+    return discord.Embed(description=msg, color=0x00aaff)
+
+# ---------------- CONTROL PANEL ----------------
 class Control(discord.ui.View):
     def __init__(self, guild_id):
         super().__init__(timeout=None)
         self.guild_id = guild_id
 
-    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="⏭️ Skip", style=discord.ButtonStyle.secondary)
     async def skip(self, interaction, button):
         vc = interaction.guild.voice_client
-        if vc:
+        if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
-            await interaction.response.send_message("⏭️ Skip", ephemeral=True)
+            await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ ไม่มีเพลงเล่นอยู่", ephemeral=True)
 
-    @discord.ui.button(label="⏸️/▶️", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="⏸️ Pause", style=discord.ButtonStyle.success)
     async def pause(self, interaction, button):
         vc = interaction.guild.voice_client
         if vc and vc.is_playing():
             vc.pause()
-            await interaction.response.send_message("⏸️ Pause", ephemeral=True)
+            await interaction.response.send_message("⏸️ Paused", ephemeral=True)
         elif vc and vc.is_paused():
             vc.resume()
-            await interaction.response.send_message("▶️ Resume", ephemeral=True)
+            await interaction.response.send_message("▶️ Resumed", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ ไม่มีเพลงเล่นอยู่", ephemeral=True)
 
-    @discord.ui.button(label="🛑", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="🛑 Stop", style=discord.ButtonStyle.danger)
     async def stop(self, interaction, button):
         vc = interaction.guild.voice_client
         if vc:
             queue[self.guild_id] = []
+            now_playing.pop(self.guild_id, None)
             await vc.disconnect()
-            await interaction.response.send_message("🛑 Stop", ephemeral=True)
+            await interaction.response.send_message("🛑 Stopped & Disconnected", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ บอทไม่ได้อยู่ในห้อง", ephemeral=True)
 
-# ---------------- PLAYER ----------------
-async def play_next(guild, channel):
-    if queue.get(guild.id):
-        song, user = queue[guild.id].pop(0)
-        await play_song(guild, channel, song, user)
+    @discord.ui.button(label="📋 Queue", style=discord.ButtonStyle.primary)
+    async def show_queue(self, interaction, button):
+        await interaction.response.send_message(
+            embed=build_queue_embed(self.guild_id),
+            ephemeral=True
+        )
 
-async def play_song(guild, channel, song, user):
-    vc = guild.voice_client
-    if not vc:
-        return
+    @discord.ui.button(label="🔀 Autoplay", style=discord.ButtonStyle.secondary)
+    async def toggle_autoplay(self, interaction, button):
+        gid = self.guild_id
+        autoplay_enabled[gid] = not autoplay_enabled.get(gid, True)
+        state = "🟢 เปิด" if autoplay_enabled[gid] else "🔴 ปิด"
+        await interaction.response.send_message(f"🔀 Autoplay: {state}", ephemeral=True)
 
-    try:
-        source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
-    except Exception as e:
-        await channel.send(embed=discord.Embed(
-            description="❌ เล่นเพลงไม่ได้",
-            color=0xff0000
-        ))
-        return
+# ---------------- QUEUE EMBED ----------------
+def build_queue_embed(guild_id):
+    np = now_playing.get(guild_id)
+    q = queue.get(guild_id, [])
+    ap = autoplay_enabled.get(guild_id, True)
 
-    vc.play(
-        source,
-        after=lambda e: asyncio.run_coroutine_threadsafe(
-            play_next(guild, channel), bot.loop)
-    )
+    e = discord.Embed(title="📋 Queue", color=0x0f0f0f)
 
-    await channel.send(embed=embed_now(song, user), view=Control(guild.id))
+    if np:
+        e.add_field(
+            name="🎧 Now Playing",
+            value=f"```{np['song']['title']}```",
+            inline=False
+        )
+    else:
+        e.add_field(name="🎧 Now Playing", value="```ไม่มีเพลง```", inline=False)
 
-# ---------------- SEARCH & PLAY LOGIC ----------------
+    if q:
+        lines = [f"`{i+1}.` {s['title']}" for i, (s, _) in enumerate(q)]
+        e.add_field(name=f"📃 Next ({len(q)} songs)", value="\n".join(lines[:10]), inline=False)
+        if len(q) > 10:
+            e.set_footer(text=f"และอีก {len(q)-10} เพลง...")
+    else:
+        e.add_field(name="📃 Next", value="```ว่างเปล่า```", inline=False)
+
+    e.add_field(name="🔀 Autoplay", value="🟢 เปิด" if ap else "🔴 ปิด", inline=False)
+    return e
+
+# ---------------- FETCH SONG ----------------
 async def fetch_song(search):
     query = search if search.startswith("http") else f"ytsearch1:{search}"
     try:
+        loop = asyncio.get_event_loop()
         with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            info = ydl.extract_info(query, download=False)
+            info = await loop.run_in_executor(
+                None, lambda: ydl.extract_info(query, download=False)
+            )
             data = info['entries'][0] if 'entries' in info else info
     except Exception:
         return None
@@ -131,27 +178,70 @@ async def fetch_song(search):
         'thumbnail': data.get('thumbnail')
     }
 
+# ---------------- PLAYER ----------------
+async def play_next(guild, channel):
+    gid = guild.id
+    now_playing.pop(gid, None)
+
+    if queue.get(gid):
+        song, user = queue[gid].pop(0)
+        await play_song(guild, channel, song, user)
+    elif autoplay_enabled.get(gid, True):
+        # สุ่มเพลงอัตโนมัติ
+        seed = random.choice(AUTOPLAY_SEEDS)
+        await channel.send(embed=discord.Embed(
+            description=f"🔀 Autoplay กำลังสุ่มเพลง: `{seed}`",
+            color=0x888888
+        ))
+        song = await fetch_song(seed)
+        if song:
+            bot_member = guild.me
+            await play_song(guild, channel, song, bot_member)
+        else:
+            await channel.send(embed=embed_error("Autoplay โหลดเพลงไม่ได้"))
+
+async def play_song(guild, channel, song, user):
+    vc = guild.voice_client
+    if not vc:
+        return
+
+    try:
+        source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
+    except Exception:
+        await channel.send(embed=embed_error("เล่นเพลงไม่ได้ ข้ามไปเพลงถัดไป..."))
+        await play_next(guild, channel)
+        return
+
+    now_playing[guild.id] = {'song': song, 'user': user}
+
+    vc.play(
+        source,
+        after=lambda e: asyncio.run_coroutine_threadsafe(
+            play_next(guild, channel), bot.loop
+        )
+    )
+
+    await channel.send(embed=embed_now(song, user), view=Control(guild.id))
+
+# ---------------- HANDLE PLAY ----------------
 async def handle_play(guild, channel, author, search):
     if not author.voice:
-        return await channel.send(embed=discord.Embed(
-            description="❌ เข้าห้องก่อน",
-            color=0xff0000
-        ))
+        return await channel.send(embed=embed_error("เข้าห้อง voice ก่อน"))
 
     vc = guild.voice_client
     if not vc:
         vc = await author.voice.channel.connect()
+    elif vc.channel != author.voice.channel:
+        await vc.move_to(author.voice.channel)
 
     song = await fetch_song(search)
     if not song:
-        return await channel.send(embed=discord.Embed(
-            description="❌ โหลดเพลงไม่ได้ (YouTube บล็อก)",
-            color=0xff0000
-        ))
+        return await channel.send(embed=embed_error("โหลดเพลงไม่ได้ (YouTube บล็อก หรือลิงก์ผิด)"))
 
     if vc.is_playing() or vc.is_paused():
-        queue.setdefault(guild.id, []).append((song, author))
-        await channel.send(embed=embed_queue(song))
+        q = queue.setdefault(guild.id, [])
+        q.append((song, author))
+        await channel.send(embed=embed_queue(song, len(q)))
     else:
         await play_song(guild, channel, song, author)
 
@@ -166,32 +256,187 @@ async def on_message(message):
             await message.delete()
         except:
             pass
-        await handle_play(message.guild, message.channel, message.author, message.content)
+        if message.content.strip():
+            await handle_play(message.guild, message.channel, message.author, message.content)
+        return
 
     await bot.process_commands(message)
 
-# ---------------- SLASH COMMAND /play ----------------
-@bot.tree.command(name="play", description="เล่นเพลงจาก YouTube")
-async def slash_play(interaction: discord.Interaction, search: str):
-    await interaction.response.defer()
-    await handle_play(interaction.guild, interaction.channel, interaction.user, search)
+# ---------------- PREFIX COMMANDS ----------------
+@bot.command(name="play", aliases=["p"])
+async def cmd_play(ctx, *, search: str):
+    """!play <ชื่อเพลง/URL>"""
+    await handle_play(ctx.guild, ctx.channel, ctx.author, search)
 
-# ---------------- PREFIX COMMAND !setup ----------------
-@bot.command()
-async def setup(ctx):
+@bot.command(name="skip", aliases=["s"])
+async def cmd_skip(ctx):
+    """!skip — ข้ามเพลง"""
+    vc = ctx.guild.voice_client
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+        await ctx.send(embed=embed_info("⏭️ Skipped"))
+    else:
+        await ctx.send(embed=embed_error("ไม่มีเพลงเล่นอยู่"))
+
+@bot.command(name="pause")
+async def cmd_pause(ctx):
+    """!pause — หยุดชั่วคราว"""
+    vc = ctx.guild.voice_client
+    if vc and vc.is_playing():
+        vc.pause()
+        await ctx.send(embed=embed_info("⏸️ Paused"))
+    else:
+        await ctx.send(embed=embed_error("ไม่มีเพลงเล่นอยู่"))
+
+@bot.command(name="resume", aliases=["r"])
+async def cmd_resume(ctx):
+    """!resume — เล่นต่อ"""
+    vc = ctx.guild.voice_client
+    if vc and vc.is_paused():
+        vc.resume()
+        await ctx.send(embed=embed_info("▶️ Resumed"))
+    else:
+        await ctx.send(embed=embed_error("ไม่ได้หยุดอยู่"))
+
+@bot.command(name="stop")
+async def cmd_stop(ctx):
+    """!stop — หยุดและออกจากห้อง"""
+    vc = ctx.guild.voice_client
+    if vc:
+        queue[ctx.guild.id] = []
+        now_playing.pop(ctx.guild.id, None)
+        await vc.disconnect()
+        await ctx.send(embed=embed_info("🛑 Stopped & Disconnected"))
+    else:
+        await ctx.send(embed=embed_error("บอทไม่ได้อยู่ในห้อง"))
+
+@bot.command(name="queue", aliases=["q"])
+async def cmd_queue(ctx):
+    """!queue — ดูคิวเพลง"""
+    await ctx.send(embed=build_queue_embed(ctx.guild.id))
+
+@bot.command(name="nowplaying", aliases=["np"])
+async def cmd_nowplaying(ctx):
+    """!np — เพลงที่กำลังเล่น"""
+    np = now_playing.get(ctx.guild.id)
+    if np:
+        await ctx.send(embed=embed_now(np['song'], np['user']))
+    else:
+        await ctx.send(embed=embed_error("ไม่มีเพลงเล่นอยู่"))
+
+@bot.command(name="clear", aliases=["cl"])
+async def cmd_clear(ctx):
+    """!clear — ล้างคิว"""
+    queue[ctx.guild.id] = []
+    await ctx.send(embed=embed_info("🗑️ ล้างคิวแล้ว"))
+
+@bot.command(name="autoplay", aliases=["ap"])
+async def cmd_autoplay(ctx):
+    """!autoplay — เปิด/ปิด autoplay"""
+    gid = ctx.guild.id
+    autoplay_enabled[gid] = not autoplay_enabled.get(gid, True)
+    state = "🟢 เปิด" if autoplay_enabled[gid] else "🔴 ปิด"
+    await ctx.send(embed=embed_info(f"🔀 Autoplay: {state}"))
+
+@bot.command(name="move", aliases=["mv"])
+async def cmd_move(ctx, from_pos: int, to_pos: int):
+    """!move <จาก> <ไป> — ย้ายเพลงในคิว"""
+    q = queue.get(ctx.guild.id, [])
+    if not q:
+        return await ctx.send(embed=embed_error("คิวว่างเปล่า"))
+    if not (1 <= from_pos <= len(q)) or not (1 <= to_pos <= len(q)):
+        return await ctx.send(embed=embed_error(f"ตำแหน่งต้องอยู่ระหว่าง 1-{len(q)}"))
+    item = q.pop(from_pos - 1)
+    q.insert(to_pos - 1, item)
+    await ctx.send(embed=embed_info(f"↕️ ย้าย `{item[0]['title']}` ไปตำแหน่ง {to_pos}"))
+
+@bot.command(name="remove", aliases=["rm"])
+async def cmd_remove(ctx, pos: int):
+    """!remove <ตำแหน่ง> — ลบเพลงออกจากคิว"""
+    q = queue.get(ctx.guild.id, [])
+    if not q:
+        return await ctx.send(embed=embed_error("คิวว่างเปล่า"))
+    if not (1 <= pos <= len(q)):
+        return await ctx.send(embed=embed_error(f"ตำแหน่งต้องอยู่ระหว่าง 1-{len(q)}"))
+    removed = q.pop(pos - 1)
+    await ctx.send(embed=embed_info(f"🗑️ ลบ `{removed[0]['title']}` ออกแล้ว"))
+
+@bot.command(name="help", aliases=["h"])
+async def cmd_help(ctx):
+    """!help — แสดงคำสั่งทั้งหมด"""
+    e = discord.Embed(title="🎧 Tete Music — คำสั่งทั้งหมด", color=0x0f0f0f)
+    cmds = [
+        ("!play / !p <เพลง>", "เล่นเพลงหรือเพิ่มเข้าคิว"),
+        ("!skip / !s", "ข้ามเพลง"),
+        ("!pause", "หยุดชั่วคราว"),
+        ("!resume / !r", "เล่นต่อ"),
+        ("!stop", "หยุดและออกจากห้อง"),
+        ("!queue / !q", "ดูคิวเพลง"),
+        ("!nowplaying / !np", "ดูเพลงที่กำลังเล่น"),
+        ("!clear / !cl", "ล้างคิว"),
+        ("!autoplay / !ap", "เปิด/ปิด autoplay"),
+        ("!move / !mv <จาก> <ไป>", "ย้ายเพลงในคิว"),
+        ("!remove / !rm <ตำแหน่ง>", "ลบเพลงออกจากคิว"),
+        ("!setup", "สร้างห้อง 🎵-music + แผงควบคุม"),
+    ]
+    for name, desc in cmds:
+        e.add_field(name=f"`{name}`", value=desc, inline=False)
+    e.set_footer(text="หรือพิมพ์ชื่อเพลงในช่อง 🎵-music ได้เลย")
+    await ctx.send(embed=e)
+
+# ---------------- SETUP ----------------
+@bot.command(name="setup")
+async def cmd_setup(ctx):
+    """!setup — สร้างห้อง 🎵-music + แผงควบคุม"""
     channel = discord.utils.get(ctx.guild.text_channels, name="🎵-music")
     if not channel:
         channel = await ctx.guild.create_text_channel("🎵-music")
 
     embed = discord.Embed(
         title="🎧 Tete Music",
-        description="```พิมพ์ชื่อเพลงได้เลย หรือใช้ /play```",
+        description="```พิมพ์ชื่อเพลงหรือ URL ได้เลย\nหรือใช้ !play <เพลง>```",
         color=0x0f0f0f
     )
     embed.add_field(name="📌 Status", value="🟢 พร้อมใช้งาน", inline=False)
+    embed.add_field(
+        name="🎮 ปุ่มควบคุม",
+        value="⏭️ Skip | ⏸️ Pause | 🛑 Stop | 📋 Queue | 🔀 Autoplay",
+        inline=False
+    )
+    embed.set_footer(text="Tete Music System")
 
     await channel.send(embed=embed, view=Control(ctx.guild.id))
-    await ctx.send(f"✅ สร้าง {channel.mention}")
+    await ctx.send(f"✅ สร้าง {channel.mention} เรียบร้อย")
+
+# ---------------- SLASH COMMANDS ----------------
+@bot.tree.command(name="play", description="เล่นเพลงจาก YouTube")
+async def slash_play(interaction: discord.Interaction, search: str):
+    await interaction.response.defer()
+    await handle_play(interaction.guild, interaction.channel, interaction.user, search)
+
+@bot.tree.command(name="queue", description="ดูคิวเพลง")
+async def slash_queue(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=build_queue_embed(interaction.guild_id))
+
+@bot.tree.command(name="skip", description="ข้ามเพลง")
+async def slash_skip(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+        await interaction.response.send_message(embed=embed_info("⏭️ Skipped"))
+    else:
+        await interaction.response.send_message(embed=embed_error("ไม่มีเพลงเล่นอยู่"))
+
+@bot.tree.command(name="stop", description="หยุดและออกจากห้อง")
+async def slash_stop(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if vc:
+        queue[interaction.guild_id] = []
+        now_playing.pop(interaction.guild_id, None)
+        await vc.disconnect()
+        await interaction.response.send_message(embed=embed_info("🛑 Stopped"))
+    else:
+        await interaction.response.send_message(embed=embed_error("บอทไม่ได้อยู่ในห้อง"))
 
 # ---------------- READY ----------------
 @bot.event
