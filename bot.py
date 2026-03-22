@@ -12,7 +12,7 @@ TOKEN = os.getenv("TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # queue[guild_id] = [(song, user), ...]
 queue = {}
@@ -361,7 +361,7 @@ async def cmd_remove(ctx, pos: int):
     removed = q.pop(pos - 1)
     await ctx.send(embed=embed_info(f"🗑️ ลบ `{removed[0]['title']}` ออกแล้ว"))
 
-@bot.command(name="help", aliases=["h"])
+@bot.command(name="menu", aliases=["h", "help"])
 async def cmd_help(ctx):
     """!help — แสดงคำสั่งทั้งหมด"""
     e = discord.Embed(title="🎧 Tete Music — คำสั่งทั้งหมด", color=0x0f0f0f)
@@ -377,6 +377,7 @@ async def cmd_help(ctx):
         ("!autoplay / !ap", "เปิด/ปิด autoplay"),
         ("!move / !mv <จาก> <ไป>", "ย้ายเพลงในคิว"),
         ("!remove / !rm <ตำแหน่ง>", "ลบเพลงออกจากคิว"),
+        ("!menu / !h", "แสดงคำสั่งทั้งหมด"),
         ("!setup", "สร้างห้อง 🎵-music + แผงควบคุม"),
     ]
     for name, desc in cmds:
