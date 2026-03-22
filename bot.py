@@ -15,7 +15,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 queue = {}
 
-# 🔥 FIX: กัน YouTube บล็อก + รองรับ cookies
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'quiet': True,
@@ -23,7 +22,7 @@ YDL_OPTIONS = {
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'extract_flat': False,
-    'cookiefile': 'cookies.txt',  # ถ้ามีจะช่วยได้มาก
+    'cookiefile': 'cookies.txt',
     'extractor_args': {
         'youtube': {
             'player_client': ['android', 'web']
@@ -100,7 +99,7 @@ async def play_song(guild, channel, song, user):
 
     try:
         source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
-    except Exception as e:  # 🔥 FIX กันเสียงพัง
+    except Exception as e:
         await channel.send(embed=discord.Embed(
             description="❌ เล่นเพลงไม่ได้",
             color=0xff0000
@@ -115,44 +114,48 @@ async def play_song(guild, channel, song, user):
 
     await channel.send(embed=embed_now(song, user), view=Control(guild.id))
 
-# ---------------- PLAY ----------------
-async def handle_play(message, search):
-    if not message.author.voice:
-        return await message.channel.send(embed=discord.Embed(
-            description="❌ เข้าห้องก่อน",
-            color=0xff0000
-        ))
-
-    vc = message.guild.voice_client
-    if not vc:
-        vc = await message.author.voice.channel.connect()
-
+# ---------------- SEARCH & PLAY LOGIC ----------------
+async def fetch_song(search):
     query = search if search.startswith("http") else f"ytsearch1:{search}"
-
-    try:  # 🔥 FIX กัน yt-dlp พัง
+    try:
         with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
             info = ydl.extract_info(query, download=False)
             data = info['entries'][0] if 'entries' in info else info
-    except Exception as e:
-        return await message.channel.send(embed=discord.Embed(
-            description="❌ โหลดเพลงไม่ได้ (YouTube บล็อก)",
-            color=0xff0000
-        ))
+    except Exception:
+        return None
 
-    song = {
+    return {
         'url': data['url'],
         'title': data['title'],
         'duration': data.get('duration_string', '0:00'),
         'thumbnail': data.get('thumbnail')
     }
 
-    if vc.is_playing():
-        queue.setdefault(message.guild.id, []).append((song, message.author))
-        await message.channel.send(embed=embed_queue(song))
-    else:
-        await play_song(message.guild, message.channel, song, message.author)
+async def handle_play(guild, channel, author, search):
+    if not author.voice:
+        return await channel.send(embed=discord.Embed(
+            description="❌ เข้าห้องก่อน",
+            color=0xff0000
+        ))
 
-# ---------------- AUTO ----------------
+    vc = guild.voice_client
+    if not vc:
+        vc = await author.voice.channel.connect()
+
+    song = await fetch_song(search)
+    if not song:
+        return await channel.send(embed=discord.Embed(
+            description="❌ โหลดเพลงไม่ได้ (YouTube บล็อก)",
+            color=0xff0000
+        ))
+
+    if vc.is_playing() or vc.is_paused():
+        queue.setdefault(guild.id, []).append((song, author))
+        await channel.send(embed=embed_queue(song))
+    else:
+        await play_song(guild, channel, song, author)
+
+# ---------------- AUTO (พิมพ์ในช่อง 🎵-music) ----------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -163,12 +166,17 @@ async def on_message(message):
             await message.delete()
         except:
             pass
-
-        await handle_play(message, message.content)
+        await handle_play(message.guild, message.channel, message.author, message.content)
 
     await bot.process_commands(message)
 
-# ---------------- SETUP ----------------
+# ---------------- SLASH COMMAND /play ----------------
+@bot.tree.command(name="play", description="เล่นเพลงจาก YouTube")
+async def slash_play(interaction: discord.Interaction, search: str):
+    await interaction.response.defer()
+    await handle_play(interaction.guild, interaction.channel, interaction.user, search)
+
+# ---------------- PREFIX COMMAND !setup ----------------
 @bot.command()
 async def setup(ctx):
     channel = discord.utils.get(ctx.guild.text_channels, name="🎵-music")
@@ -177,10 +185,9 @@ async def setup(ctx):
 
     embed = discord.Embed(
         title="🎧 Tete Music",
-        description="```พิมพ์ชื่อเพลงได้เลย```",
+        description="```พิมพ์ชื่อเพลงได้เลย หรือใช้ /play```",
         color=0x0f0f0f
     )
-
     embed.add_field(name="📌 Status", value="🟢 พร้อมใช้งาน", inline=False)
 
     await channel.send(embed=embed, view=Control(ctx.guild.id))
@@ -190,5 +197,10 @@ async def setup(ctx):
 @bot.event
 async def on_ready():
     print(f"🔥 Bot Ready: {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash command(s)")
+    except Exception as e:
+        print(f"❌ Sync failed: {e}")
 
 bot.run(TOKEN)
