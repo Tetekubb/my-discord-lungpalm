@@ -16,26 +16,41 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 # queue[guild_id] = [(song, user), ...]
 queue = {}
-# เก็บเพลงที่กำลังเล่นอยู่
 now_playing = {}
-# autoplay on/off per guild
 autoplay_enabled = {}
 
+# ---------------- YDL OPTIONS (แก้ YouTube บล็อก) ----------------
 def build_ydl_options():
     opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
         'quiet': True,
         'noplaylist': True,
         'nocheckcertificate': True,
         'ignoreerrors': False,
         'extract_flat': False,
+        'age_limit': None,
+        'geo_bypass': True,
+        'geo_bypass_country': 'TH',
+        # ใช้ iOS client — ไม่ถูก bot-check เหมือน web
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web']
+                'player_client': ['ios', 'android', 'web'],
+                'player_skip': ['webpage', 'js'],
             }
-        }
+        },
+        # headers เหมือน browser จริง
+        'http_headers': {
+            'User-Agent': (
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '
+                'Mobile/15E148 Safari/604.1'
+            ),
+            'Accept-Language': 'th-TH,th;q=0.9,en;q=0.8',
+        },
+        'socket_timeout': 15,
+        'retries': 3,
     }
-    # ใส่ cookies เฉพาะเมื่อไฟล์มีอยู่และถูก format (Netscape)
+
     if os.path.exists('cookies.txt'):
         with open('cookies.txt', 'r', errors='ignore') as f:
             first_line = f.readline().strip()
@@ -46,14 +61,27 @@ def build_ydl_options():
             print("⚠️  cookies.txt ผิด format — ข้ามการใช้ cookies")
     else:
         print("⚠️  ไม่พบ cookies.txt — โหลดแบบไม่มี cookies")
+
+    return opts
+
+# fallback ถ้า iOS client ยัง bล็อก — ลอง mweb + android_vr
+def build_ydl_options_fallback():
+    opts = build_ydl_options()
+    opts['extractor_args'] = {
+        'youtube': {
+            'player_client': ['mweb', 'android_vr'],
+        }
+    }
     return opts
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'before_options': (
+        '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+        '-nostdin'
+    ),
+    'options': '-vn -b:a 128k',
 }
 
-# เพลงสุ่มสำหรับ autoplay (เพิ่มได้เลย)
 AUTOPLAY_SEEDS = [
     "lofi hip hop chill",
     "jazz relaxing music",
@@ -149,13 +177,8 @@ def build_queue_embed(guild_id):
     ap = autoplay_enabled.get(guild_id, True)
 
     e = discord.Embed(title="📋 Queue", color=0x0f0f0f)
-
     if np:
-        e.add_field(
-            name="🎧 Now Playing",
-            value=f"```{np['song']['title']}```",
-            inline=False
-        )
+        e.add_field(name="🎧 Now Playing", value=f"```{np['song']['title']}```", inline=False)
     else:
         e.add_field(name="🎧 Now Playing", value="```ไม่มีเพลง```", inline=False)
 
@@ -170,25 +193,37 @@ def build_queue_embed(guild_id):
     e.add_field(name="🔀 Autoplay", value="🟢 เปิด" if ap else "🔴 ปิด", inline=False)
     return e
 
-# ---------------- FETCH SONG ----------------
+# ---------------- FETCH SONG (มี fallback 2 ชั้น) ----------------
 async def fetch_song(search):
     query = search if search.startswith("http") else f"ytsearch1:{search}"
-    try:
-        loop = asyncio.get_event_loop()
-        with yt_dlp.YoutubeDL(build_ydl_options()) as ydl:
-            info = await loop.run_in_executor(
-                None, lambda: ydl.extract_info(query, download=False)
-            )
-            data = info['entries'][0] if 'entries' in info else info
-    except Exception:
-        return None
+    loop = asyncio.get_event_loop()
 
-    return {
-        'url': data['url'],
-        'title': data['title'],
-        'duration': data.get('duration_string', '0:00'),
-        'thumbnail': data.get('thumbnail')
-    }
+    # ลองด้วย options หลัก (iOS client)
+    for opts_func, label in [
+        (build_ydl_options, "iOS client"),
+        (build_ydl_options_fallback, "mweb/android_vr fallback"),
+    ]:
+        try:
+            with yt_dlp.YoutubeDL(opts_func()) as ydl:
+                info = await loop.run_in_executor(
+                    None, lambda: ydl.extract_info(query, download=False)
+                )
+                data = info['entries'][0] if 'entries' in info else info
+                url = data.get('url') or (data.get('formats') or [{}])[-1].get('url')
+                if not url:
+                    raise ValueError("ไม่พบ stream URL")
+                print(f"✅ โหลดสำเร็จด้วย {label}: {data['title']}")
+                return {
+                    'url': url,
+                    'title': data['title'],
+                    'duration': data.get('duration_string', '0:00'),
+                    'thumbnail': data.get('thumbnail'),
+                }
+        except Exception as e:
+            print(f"⚠️  {label} ล้มเหลว: {e}")
+
+    print("❌ โหลดเพลงล้มเหลวทุก client")
+    return None
 
 # ---------------- PLAYER ----------------
 async def play_next(guild, channel):
@@ -199,7 +234,6 @@ async def play_next(guild, channel):
         song, user = queue[gid].pop(0)
         await play_song(guild, channel, song, user)
     elif autoplay_enabled.get(gid, True):
-        # สุ่มเพลงอัตโนมัติ
         seed = random.choice(AUTOPLAY_SEEDS)
         await channel.send(embed=discord.Embed(
             description=f"🔀 Autoplay กำลังสุ่มเพลง: `{seed}`",
@@ -207,8 +241,7 @@ async def play_next(guild, channel):
         ))
         song = await fetch_song(seed)
         if song:
-            bot_member = guild.me
-            await play_song(guild, channel, song, bot_member)
+            await play_song(guild, channel, song, guild.me)
         else:
             await channel.send(embed=embed_error("Autoplay โหลดเพลงไม่ได้"))
 
@@ -219,7 +252,8 @@ async def play_song(guild, channel, song, user):
 
     try:
         source = await discord.FFmpegOpusAudio.from_probe(song['url'], **FFMPEG_OPTIONS)
-    except Exception:
+    except Exception as e:
+        print(f"❌ FFmpeg error: {e}")
         await channel.send(embed=embed_error("เล่นเพลงไม่ได้ ข้ามไปเพลงถัดไป..."))
         await play_next(guild, channel)
         return
@@ -246,9 +280,22 @@ async def handle_play(guild, channel, author, search):
     elif vc.channel != author.voice.channel:
         await vc.move_to(author.voice.channel)
 
+    # แสดง loading
+    loading_msg = await channel.send(embed=discord.Embed(
+        description=f"🔍 กำลังโหลด: `{search}`...",
+        color=0x888888
+    ))
+
     song = await fetch_song(search)
+    await loading_msg.delete()
+
     if not song:
-        return await channel.send(embed=embed_error("โหลดเพลงไม่ได้ (YouTube บล็อก หรือลิงก์ผิด)"))
+        return await channel.send(embed=embed_error(
+            "โหลดเพลงไม่ได้\n"
+            "• YouTube อาจบล็อก IP ของ server\n"
+            "• ลองใส่ cookies.txt ใหม่\n"
+            "• หรือลอง URL อื่น"
+        ))
 
     if vc.is_playing() or vc.is_paused():
         q = queue.setdefault(guild.id, [])
@@ -266,7 +313,7 @@ async def on_message(message):
     if message.channel.name == "🎵-music":
         try:
             await message.delete()
-        except:
+        except Exception:
             pass
         if message.content.strip():
             await handle_play(message.guild, message.channel, message.author, message.content)
@@ -277,12 +324,10 @@ async def on_message(message):
 # ---------------- PREFIX COMMANDS ----------------
 @bot.command(name="play", aliases=["p"])
 async def cmd_play(ctx, *, search: str):
-    """!play <ชื่อเพลง/URL>"""
     await handle_play(ctx.guild, ctx.channel, ctx.author, search)
 
 @bot.command(name="skip", aliases=["s"])
 async def cmd_skip(ctx):
-    """!skip — ข้ามเพลง"""
     vc = ctx.guild.voice_client
     if vc and (vc.is_playing() or vc.is_paused()):
         vc.stop()
@@ -292,7 +337,6 @@ async def cmd_skip(ctx):
 
 @bot.command(name="pause")
 async def cmd_pause(ctx):
-    """!pause — หยุดชั่วคราว"""
     vc = ctx.guild.voice_client
     if vc and vc.is_playing():
         vc.pause()
@@ -302,7 +346,6 @@ async def cmd_pause(ctx):
 
 @bot.command(name="resume", aliases=["r"])
 async def cmd_resume(ctx):
-    """!resume — เล่นต่อ"""
     vc = ctx.guild.voice_client
     if vc and vc.is_paused():
         vc.resume()
@@ -312,7 +355,6 @@ async def cmd_resume(ctx):
 
 @bot.command(name="stop")
 async def cmd_stop(ctx):
-    """!stop — หยุดและออกจากห้อง"""
     vc = ctx.guild.voice_client
     if vc:
         queue[ctx.guild.id] = []
@@ -324,12 +366,10 @@ async def cmd_stop(ctx):
 
 @bot.command(name="queue", aliases=["q"])
 async def cmd_queue(ctx):
-    """!queue — ดูคิวเพลง"""
     await ctx.send(embed=build_queue_embed(ctx.guild.id))
 
 @bot.command(name="nowplaying", aliases=["np"])
 async def cmd_nowplaying(ctx):
-    """!np — เพลงที่กำลังเล่น"""
     np = now_playing.get(ctx.guild.id)
     if np:
         await ctx.send(embed=embed_now(np['song'], np['user']))
@@ -338,13 +378,11 @@ async def cmd_nowplaying(ctx):
 
 @bot.command(name="clear", aliases=["cl"])
 async def cmd_clear(ctx):
-    """!clear — ล้างคิว"""
     queue[ctx.guild.id] = []
     await ctx.send(embed=embed_info("🗑️ ล้างคิวแล้ว"))
 
 @bot.command(name="autoplay", aliases=["ap"])
 async def cmd_autoplay(ctx):
-    """!autoplay — เปิด/ปิด autoplay"""
     gid = ctx.guild.id
     autoplay_enabled[gid] = not autoplay_enabled.get(gid, True)
     state = "🟢 เปิด" if autoplay_enabled[gid] else "🔴 ปิด"
@@ -352,7 +390,6 @@ async def cmd_autoplay(ctx):
 
 @bot.command(name="move", aliases=["mv"])
 async def cmd_move(ctx, from_pos: int, to_pos: int):
-    """!move <จาก> <ไป> — ย้ายเพลงในคิว"""
     q = queue.get(ctx.guild.id, [])
     if not q:
         return await ctx.send(embed=embed_error("คิวว่างเปล่า"))
@@ -364,7 +401,6 @@ async def cmd_move(ctx, from_pos: int, to_pos: int):
 
 @bot.command(name="remove", aliases=["rm"])
 async def cmd_remove(ctx, pos: int):
-    """!remove <ตำแหน่ง> — ลบเพลงออกจากคิว"""
     q = queue.get(ctx.guild.id, [])
     if not q:
         return await ctx.send(embed=embed_error("คิวว่างเปล่า"))
@@ -375,7 +411,6 @@ async def cmd_remove(ctx, pos: int):
 
 @bot.command(name="menu", aliases=["h", "help"])
 async def cmd_help(ctx):
-    """!help — แสดงคำสั่งทั้งหมด"""
     e = discord.Embed(title="🎧 Tete Music — คำสั่งทั้งหมด", color=0x0f0f0f)
     cmds = [
         ("!play / !p <เพลง>", "เล่นเพลงหรือเพิ่มเข้าคิว"),
@@ -400,7 +435,6 @@ async def cmd_help(ctx):
 # ---------------- SETUP ----------------
 @bot.command(name="setup")
 async def cmd_setup(ctx):
-    """!setup — สร้างห้อง 🎵-music + แผงควบคุม"""
     channel = discord.utils.get(ctx.guild.text_channels, name="🎵-music")
     if not channel:
         channel = await ctx.guild.create_text_channel("🎵-music")
@@ -417,7 +451,6 @@ async def cmd_setup(ctx):
         inline=False
     )
     embed.set_footer(text="Tete Music System")
-
     await channel.send(embed=embed, view=Control(ctx.guild.id))
     await ctx.send(f"✅ สร้าง {channel.mention} เรียบร้อย")
 
