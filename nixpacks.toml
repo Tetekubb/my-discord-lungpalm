@@ -1,1 +1,2 @@
-
+[phases.build]
+cmds = ["pip install -U yt-dlp"]
