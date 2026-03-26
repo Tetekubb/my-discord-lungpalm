@@ -6,7 +6,7 @@ import os
 # ============================================================
 #  ตั้งค่า Bot
 # ============================================================
-TOKEN = os.environ["TOKEN"]   # อ่านจาก Environment Variable บน Railway
+TOKEN = os.environ["TOKEN"]
 
 intents = discord.Intents.default()
 intents.guilds = True
@@ -25,211 +25,236 @@ async def on_ready():
 
 
 # ============================================================
-#  !clone  —  Clone ห้องและหมวดหมู่จาก server ต้นทาง
+#  Helper: รัน coroutine พร้อม retry อัตโนมัติตอน rate limit
+# ============================================================
+async def safe_run(label, coro, retries=5):
+    for attempt in range(retries):
+        try:
+            result = await coro
+            await asyncio.sleep(1.0)
+            return result
+        except discord.HTTPException as e:
+            if e.status == 429:
+                retry_after = 5.0
+                try:
+                    retry_after = float(e.response.headers.get("Retry-After", 5))
+                except Exception:
+                    pass
+                print(f"⏳ Rate limit [{label}] — รอ {retry_after:.1f}s (ครั้งที่ {attempt+1})")
+                await asyncio.sleep(retry_after + 1)
+            else:
+                print(f"❌ HTTP {e.status} [{label}]: {e.text}")
+                return None
+        except discord.Forbidden:
+            print(f"🚫 Forbidden [{label}]: บอทไม่มีสิทธิ์")
+            return None
+        except Exception as e:
+            print(f"⚠️ Error [{label}]: {type(e).__name__}: {e}")
+            return None
+    print(f"❌ หมดจำนวน retry [{label}]")
+    return None
+
+
+# ============================================================
+#  !clone
 # ============================================================
 @bot.command(name="clone")
 @commands.has_permissions(administrator=True)
 async def clone_server(ctx, source_guild_id: int = None):
     """
-    ใช้งาน:
-        !clone                  → clone server ปัจจุบัน (จัดโครงสร้างใหม่)
-        !clone <SERVER_ID>      → clone จาก server อื่นที่บอทอยู่
-
-    บอทต้องมีสิทธิ์ Administrator ใน server ปลายทาง
+    !clone                → clone โครงสร้างใน server นี้ใหม่
+    !clone <SERVER_ID>    → clone จาก server อื่น
     """
     dest_guild = ctx.guild
 
-    # กำหนด server ต้นทาง
     if source_guild_id is None:
         source_guild = ctx.guild
     else:
         source_guild = bot.get_guild(source_guild_id)
         if source_guild is None:
-            await ctx.send("❌ ไม่พบ Server ต้นทาง — ตรวจสอบว่าบอทอยู่ใน Server นั้นด้วย")
+            await ctx.send("❌ ไม่พบ Server ต้นทาง — บอทต้องอยู่ใน Server นั้นด้วย")
             return
 
     if source_guild.id == dest_guild.id and source_guild_id is not None:
-        await ctx.send("⚠️ Server ต้นทางและปลายทางเป็น Server เดียวกัน")
+        await ctx.send("⚠️ ต้นทางและปลายทางเป็น Server เดียวกัน")
         return
 
+    total_src_cats = len(source_guild.categories)
+    total_src_ch   = len([c for c in source_guild.channels
+                          if not isinstance(c, discord.CategoryChannel)])
+    print(f"📋 ต้นทาง: {source_guild.name} | {total_src_cats} categories, {total_src_ch} channels")
+
     msg = await ctx.send(
-        f"⏳ กำลัง Clone จาก **{source_guild.name}** ไปยัง **{dest_guild.name}**...\n"
-        "*(กระบวนการนี้จะลบห้องและหมวดหมู่เดิมทั้งหมดในเซิร์ฟเวอร์ปลายทาง)*"
+        f"⏳ กำลัง Clone จาก **{source_guild.name}** → **{dest_guild.name}**\n"
+        f"📋 ต้นทางมี `{total_src_cats}` categories, `{total_src_ch}` channels\n"
+        "*(ห้องและหมวดหมู่เดิมจะถูกลบก่อน)*"
     )
 
-    # ────────────────────────────────────────────
-    # 1. ลบทุกช่องและหมวดหมู่ใน server ปลายทาง
-    # ────────────────────────────────────────────
-    await msg.edit(content="🗑️ กำลังลบช่องและหมวดหมู่เดิม...")
-    for channel in dest_guild.channels:
-        try:
-            await channel.delete()
-            await asyncio.sleep(0.5)   # หน่วงเวลาเพื่อเลี่ยง rate limit
-        except discord.Forbidden:
-            await ctx.send(f"⚠️ ไม่มีสิทธิ์ลบ: {channel.name}")
-        except Exception as e:
-            await ctx.send(f"⚠️ Error ลบ {channel.name}: {e}")
+    # ── 1. ลบห้องเดิม ──
+    await msg.edit(content="🗑️ [1/4] กำลังลบห้องและหมวดหมู่เดิม...")
+    print("── Step 1: ลบห้องเดิม ──")
+    channels_to_delete = list(dest_guild.channels)
+    for ch in channels_to_delete:
+        print(f"  ลบ: #{ch.name}")
+        await safe_run(f"delete {ch.name}", ch.delete())
+    print(f"  ✅ ลบเสร็จ {len(channels_to_delete)} ช่อง")
 
-    # ────────────────────────────────────────────
-    # 2. Clone Roles (ข้าม @everyone)
-    # ────────────────────────────────────────────
-    await msg.edit(content="🎭 กำลัง Clone Roles...")
-    role_map = {}   # source role id → dest role object
-
-    # เรียงจาก position ต่ำไปสูง (ยกเว้น @everyone)
+    # ── 2. Clone Roles ──
+    await msg.edit(content="🎭 [2/4] กำลัง Clone Roles...")
+    print("── Step 2: Clone Roles ──")
+    role_map = {}
     sorted_roles = sorted(
         [r for r in source_guild.roles if r.name != "@everyone"],
         key=lambda r: r.position
     )
-
     for role in sorted_roles:
-        try:
-            new_role = await dest_guild.create_role(
+        print(f"  สร้าง role: {role.name}")
+        new_role = await safe_run(
+            f"role {role.name}",
+            dest_guild.create_role(
                 name=role.name,
                 permissions=role.permissions,
                 colour=role.colour,
                 hoist=role.hoist,
                 mentionable=role.mentionable,
             )
+        )
+        if new_role:
             role_map[role.id] = new_role
-            await asyncio.sleep(0.5)
-        except discord.Forbidden:
-            await ctx.send(f"⚠️ ไม่มีสิทธิ์สร้าง Role: {role.name}")
-        except Exception as e:
-            await ctx.send(f"⚠️ Error สร้าง Role {role.name}: {e}")
+    print(f"  ✅ สร้าง roles เสร็จ {len(role_map)} roles")
 
-    # ────────────────────────────────────────────
-    # 3. Clone Categories และ Channels
-    # ────────────────────────────────────────────
-    await msg.edit(content="📁 กำลัง Clone หมวดหมู่และห้อง...")
+    # ── 3. Clone Categories + Channels ──
+    await msg.edit(content="📁 [3/4] กำลัง Clone Categories และ Channels...")
+    print("── Step 3: Clone Channels ──")
 
-    def build_overwrites(source_channel):
-        """แปลง permission overwrites จาก source → dest"""
-        new_overwrites = {}
-        for target, overwrite in source_channel.overwrites.items():
+    def build_overwrites(src_ch):
+        ow = {}
+        for target, overwrite in src_ch.overwrites.items():
             if isinstance(target, discord.Role):
                 if target.name == "@everyone":
-                    dest_role = dest_guild.default_role
-                else:
-                    dest_role = role_map.get(target.id)
-                if dest_role:
-                    new_overwrites[dest_role] = overwrite
-        return new_overwrites
+                    ow[dest_guild.default_role] = overwrite
+                elif target.id in role_map:
+                    ow[role_map[target.id]] = overwrite
+        return ow
 
-    # ── Channels ที่ไม่มี Category ──
-    no_cat_channels = sorted(
+    created_ch = 0
+    failed_ch  = 0
+
+    # ช่องไม่มี category
+    no_cat = sorted(
         [c for c in source_guild.channels
          if c.category is None and not isinstance(c, discord.CategoryChannel)],
         key=lambda c: c.position
     )
-    for ch in no_cat_channels:
-        try:
-            ow = build_overwrites(ch)
-            if isinstance(ch, discord.TextChannel):
-                await dest_guild.create_text_channel(
-                    name=ch.name,
-                    topic=ch.topic,
+    for ch in no_cat:
+        ow = build_overwrites(ch)
+        print(f"  สร้างช่อง (no cat): #{ch.name}")
+        result = None
+        if isinstance(ch, discord.TextChannel):
+            result = await safe_run(
+                f"text {ch.name}",
+                dest_guild.create_text_channel(
+                    name=ch.name, topic=ch.topic,
                     slowmode_delay=ch.slowmode_delay,
-                    nsfw=ch.nsfw,
-                    overwrites=ow,
+                    nsfw=ch.nsfw, overwrites=ow,
                 )
-            elif isinstance(ch, discord.VoiceChannel):
-                await dest_guild.create_voice_channel(
+            )
+        elif isinstance(ch, discord.VoiceChannel):
+            result = await safe_run(
+                f"voice {ch.name}",
+                dest_guild.create_voice_channel(
                     name=ch.name,
                     bitrate=min(ch.bitrate, dest_guild.bitrate_limit),
-                    user_limit=ch.user_limit,
-                    overwrites=ow,
+                    user_limit=ch.user_limit, overwrites=ow,
+                )
+            )
+        if result:
+            created_ch += 1
+        else:
+            failed_ch += 1
+
+    # categories + ช่องข้างใน
+    sorted_categories = sorted(source_guild.categories, key=lambda c: c.position)
+    for cat in sorted_categories:
+        print(f"  สร้าง category: {cat.name}")
+        ow_cat = build_overwrites(cat)
+        new_cat = await safe_run(
+            f"category {cat.name}",
+            dest_guild.create_category(name=cat.name, overwrites=ow_cat)
+        )
+        if new_cat is None:
+            print(f"  ❌ สร้าง category ล้มเหลว: {cat.name}")
+            failed_ch += len(cat.channels)
+            continue
+
+        for ch in sorted(cat.channels, key=lambda c: c.position):
+            ow = build_overwrites(ch)
+            print(f"    สร้าง: #{ch.name} [{type(ch).__name__}]")
+            result = None
+
+            if isinstance(ch, discord.TextChannel):
+                result = await safe_run(
+                    f"text {ch.name}",
+                    dest_guild.create_text_channel(
+                        name=ch.name, category=new_cat, topic=ch.topic,
+                        slowmode_delay=ch.slowmode_delay,
+                        nsfw=ch.nsfw, overwrites=ow,
+                    )
+                )
+            elif isinstance(ch, discord.VoiceChannel):
+                result = await safe_run(
+                    f"voice {ch.name}",
+                    dest_guild.create_voice_channel(
+                        name=ch.name, category=new_cat,
+                        bitrate=min(ch.bitrate, dest_guild.bitrate_limit),
+                        user_limit=ch.user_limit, overwrites=ow,
+                    )
+                )
+            elif isinstance(ch, discord.StageChannel):
+                result = await safe_run(
+                    f"stage {ch.name}",
+                    dest_guild.create_stage_channel(
+                        name=ch.name, category=new_cat, overwrites=ow,
+                    )
                 )
             elif isinstance(ch, discord.ForumChannel):
-                await dest_guild.create_forum(
-                    name=ch.name,
-                    topic=ch.topic or "",
-                    overwrites=ow,
+                result = await safe_run(
+                    f"forum {ch.name}",
+                    dest_guild.create_forum(
+                        name=ch.name, category=new_cat,
+                        topic=ch.topic or "", overwrites=ow,
+                    )
                 )
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            await ctx.send(f"⚠️ Error สร้างช่อง {ch.name}: {e}")
 
-    # ── Categories + ช่องข้างใน ──
-    sorted_categories = sorted(
-        [c for c in source_guild.categories],
-        key=lambda c: c.position
+            if result:
+                created_ch += 1
+            else:
+                failed_ch += 1
+
+    print(f"  ✅ สร้างช่องเสร็จ: {created_ch} สำเร็จ, {failed_ch} ล้มเหลว")
+
+    # ── 4. สรุป ──
+    status = "✅" if failed_ch == 0 else "⚠️"
+    summary = (
+        f"{status} **Clone เสร็จแล้ว!**\n"
+        f"📁 Categories: `{len(sorted_categories)}`\n"
+        f"💬 Channels: `{created_ch}` / `{created_ch + failed_ch}` สำเร็จ\n"
+        f"🎭 Roles: `{len(role_map)}`"
     )
-    for category in sorted_categories:
-        try:
-            ow_cat = build_overwrites(category)
-            new_category = await dest_guild.create_category(
-                name=category.name,
-                overwrites=ow_cat,
-            )
-            await asyncio.sleep(0.5)
+    if failed_ch > 0:
+        summary += f"\n⚠️ ล้มเหลว `{failed_ch}` ช่อง — ดู log ใน Railway console"
 
-            for channel in sorted(category.channels, key=lambda c: c.position):
-                try:
-                    ow_ch = build_overwrites(channel)
-                    if isinstance(channel, discord.TextChannel):
-                        await dest_guild.create_text_channel(
-                            name=channel.name,
-                            category=new_category,
-                            topic=channel.topic,
-                            slowmode_delay=channel.slowmode_delay,
-                            nsfw=channel.nsfw,
-                            overwrites=ow_ch,
-                        )
-                    elif isinstance(channel, discord.VoiceChannel):
-                        await dest_guild.create_voice_channel(
-                            name=channel.name,
-                            category=new_category,
-                            bitrate=min(channel.bitrate, dest_guild.bitrate_limit),
-                            user_limit=channel.user_limit,
-                            overwrites=ow_ch,
-                        )
-                    elif isinstance(channel, discord.StageChannel):
-                        await dest_guild.create_stage_channel(
-                            name=channel.name,
-                            category=new_category,
-                            overwrites=ow_ch,
-                        )
-                    elif isinstance(channel, discord.ForumChannel):
-                        await dest_guild.create_forum(
-                            name=channel.name,
-                            category=new_category,
-                            topic=channel.topic or "",
-                            overwrites=ow_ch,
-                        )
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    await ctx.send(f"⚠️ Error สร้างช่อง {channel.name}: {e}")
-
-        except Exception as e:
-            await ctx.send(f"⚠️ Error สร้าง Category {category.name}: {e}")
-
-    # ────────────────────────────────────────────
-    # 4. เสร็จสิ้น
-    # ────────────────────────────────────────────
-    total_cats = len(source_guild.categories)
-    total_channels = len([c for c in source_guild.channels
-                          if not isinstance(c, discord.CategoryChannel)])
-    total_roles = len(role_map)
-
-    await msg.edit(
-        content=(
-            f"✅ **Clone สำเร็จ!**\n"
-            f"📁 หมวดหมู่: `{total_cats}` | "
-            f"💬 ห้อง: `{total_channels}` | "
-            f"🎭 Roles: `{total_roles}`"
-        )
-    )
+    await msg.edit(content=summary)
+    print(f"── Clone เสร็จ: {created_ch} OK, {failed_ch} FAIL ──")
 
 
 # ============================================================
-#  !serverlist  —  ดู Server ที่บอทอยู่ (พร้อม ID)
+#  !serverlist
 # ============================================================
 @bot.command(name="serverlist")
 @commands.has_permissions(administrator=True)
 async def server_list(ctx):
-    """แสดงรายชื่อ Server ทั้งหมดที่บอทอยู่ พร้อม ID"""
-    lines = [f"**Server ที่บอทอยู่ทั้งหมด:**"]
+    lines = ["**Server ที่บอทอยู่ทั้งหมด:**"]
     for guild in bot.guilds:
         lines.append(f"• {guild.name} — `{guild.id}`")
     await ctx.send("\n".join(lines))
@@ -241,11 +266,12 @@ async def server_list(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ คุณไม่มีสิทธิ์ใช้คำสั่งนี้ (ต้องการ Administrator)")
+        await ctx.send("❌ ต้องการสิทธิ์ Administrator")
     elif isinstance(error, commands.BadArgument):
-        await ctx.send("❌ รูปแบบคำสั่งไม่ถูกต้อง\nตัวอย่าง: `!clone` หรือ `!clone 1234567890`")
+        await ctx.send("❌ รูปแบบผิด — ตัวอย่าง: `!clone` หรือ `!clone 1234567890`")
     else:
-        await ctx.send(f"❌ เกิดข้อผิดพลาด: {error}")
+        print(f"Unhandled error: {error}")
+        await ctx.send(f"❌ Error: {error}")
 
 
 # ============================================================
